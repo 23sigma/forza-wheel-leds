@@ -38,12 +38,8 @@ jobs:
           Copy-Item README.md $dir\
           Copy-Item LICENSE $dir\
           # Add a reminder file about the DLL
-          @"
-Place LogitechSteeringWheelEnginesWrapper.dll here (next to forza_wheel_leds.exe).
-
-Download the Logitech Steering Wheel SDK:
-https://www.logitechg.com/sdk/LogitechSteeringWheelSDK_8.75.30.zip
-"@ | Out-File -FilePath "$dir\PUT_LOGITECH_DLL_HERE.txt" -Encoding utf8
+          $txt = "Place LogitechSteeringWheelEnginesWrapper.dll here (next to forza_wheel_leds.exe).`n`nDownload the Logitech Steering Wheel SDK:`nhttps://www.logitechg.com/sdk/LogitechSteeringWheelSDK_8.75.30.zip"
+          $txt | Out-File -FilePath "$dir\PUT_LOGITECH_DLL_HERE.txt" -Encoding utf8
           Compress-Archive -Path $dir -DestinationPath "forza_wheel_leds_$tag.zip"
 
       - name: Create GitHub Release
