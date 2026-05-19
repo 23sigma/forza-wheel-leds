@@ -313,9 +313,9 @@ def main() -> None:
                 print(f"\n[INFO] Game detected: {packet['game']}")
                 last_game = packet["game"]
 
-            if not packet["is_race_on"] or packet["max_rpm"] <= 0:
+            if packet["max_rpm"] <= 0:
                 apply_led_action(dll, LED_OFF, 0, 0, 0)
-                print("  Waiting for race …               ", end="\r")
+                print("  Waiting for telemetry …               ", end="\r")
                 continue
 
             min_rpm      = packet["max_rpm"] * LED_MIN_RPM_RATIO

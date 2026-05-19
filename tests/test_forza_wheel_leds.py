@@ -379,11 +379,14 @@ class TestMain(unittest.TestCase):
                            gear=2, raw_size=331)
         self._run_main([pkt])
 
-    def test_main_no_race(self):
-        pkt = _pack_packet(is_race_on=0, raw_size=323)
+    def test_main_no_race_but_driving(self):
+        # IsRaceOn=0 (free roam) but max_rpm > 0 → LEDs should still work
+        pkt = _pack_packet(is_race_on=0, max_rpm=8000, current_rpm=4000,
+                           gear=3, raw_size=323)
         self._run_main([pkt])
 
-    def test_main_max_rpm_zero(self):
+    def test_main_max_rpm_zero_turns_leds_off(self):
+        # max_rpm=0 → LEDs off (in menu, no car loaded)
         pkt = _pack_packet(is_race_on=1, max_rpm=0, current_rpm=0, raw_size=323)
         self._run_main([pkt])
 
