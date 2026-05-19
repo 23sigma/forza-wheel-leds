@@ -1,6 +1,6 @@
 # forza-wheel-leds
 
-Lights up the RPM LEDs on your **Logitech G920 / G29 / G923** steering wheel using live telemetry from **Forza Horizon 5**, **Forza Horizon 6**, and **Forza Motorsport (2023)**.
+Lights up the RPM LEDs on your **Logitech G29 / G920** steering wheel using live telemetry from **Forza Horizon 5**, **Forza Horizon 6**, and **Forza Motorsport (2023)**.
 
 Forza does not natively drive the wheel LEDs — this tool bridges the gap.
 
@@ -15,11 +15,13 @@ Forza does not natively drive the wheel LEDs — this tool bridges the gap.
 ## How it works
 
 ```
-Forza (UDP Data Out)  →  forza-wheel-leds  →  Logitech SDK  →  G920 RPM LEDs
+Forza (UDP Data Out)  →  forza-wheel-leds  →  USB HID  →  G29 / G920 RPM LEDs
 ```
 
 Forza broadcasts real-time telemetry over UDP (~60 packets/s).  
-This tool reads `CurrentEngineRpm` and `EngineMaxRpm` from each packet and calls the official Logitech Steering Wheel SDK to light the 5 LEDs accordingly.
+This tool reads `CurrentEngineRpm` and `EngineMaxRpm` from each packet and sends a direct **USB HID command** to the wheel to light the 5 LEDs accordingly.
+
+No Logitech G HUB required. No DLL. No driver.
 
 ---
 
@@ -27,11 +29,9 @@ This tool reads `CurrentEngineRpm` and `EngineMaxRpm` from each packet and calls
 
 | Requirement | Notes |
 |---|---|
-| Windows 10 / 11 | Linux/macOS not supported (Logitech SDK is Windows-only) |
-| Logitech G HUB | Must be installed **and running** in the background |
+| Windows 10 / 11 | Linux/macOS not officially supported |
+| Logitech G29 or G920 | Plugged in via USB |
 | Python 3.8+ | Only needed if running the `.py` script — not needed for the `.exe` release |
-
-> The Logitech DLL is included in this repo (`dll/x64/` and `dll/x86/`) and bundled automatically in every release zip.
 
 ---
 
@@ -41,18 +41,15 @@ This tool reads `CurrentEngineRpm` and `EngineMaxRpm` from each packet and calls
 
 1. Download the latest `forza_wheel_leds_vX.X.X.zip` from [Releases](../../releases/latest) and extract it.
 2. Configure Forza (see [In-game setup](#in-game-setup)).
-3. Double-click `forza_wheel_leds.exe`.
-
-> The Logitech DLL (`LogitechSteeringWheelEnginesWrapper.dll`) is included in the zip — nothing else to download.
+3. Plug in your G29 or G920 via USB.
+4. Double-click `forza_wheel_leds.exe`.
 
 ### Option B — Python script
 
 ```bash
-# No dependencies to install — uses Python stdlib only
+pip install hid
 python forza_wheel_leds.py
 ```
-
-Place `dll/x64/LogitechSteeringWheelEnginesWrapper.dll` (or `dll/x86/` for 32-bit Python) in the same folder as the script.
 
 ---
 
@@ -76,17 +73,24 @@ Data Out IP Port     : 5607
 
 ---
 
+## Supported Wheels
+
+| Wheel | LEDs | USB PID |
+|---|---|---|
+| Logitech G29 | 5 (green → yellow → red) | `046D:C24F` |
+| Logitech G920 | 5 | `046D:C262` |
+
+---
+
 ## Troubleshooting
 
 **LEDs don't light up**
-- Is Logitech G HUB installed and running in the system tray?
+- Is the wheel plugged in via USB?
 - Did you set Data Out to ON in Forza and use port `5607`?
+- Make sure the wheel is in **PC mode** (not console mode).
 
-**`[ERROR] Could not load DLL`**
-- The DLL is missing from the folder. For the `.exe`: re-download the release zip (DLL is included). For the script: copy `dll/x64/LogitechSteeringWheelEnginesWrapper.dll` next to `forza_wheel_leds.py`.
-
-**`[WARN] No Logitech wheel detected`**
-- Plug in the wheel before launching the tool, or launch the tool after G HUB has detected the wheel.
+**`[WARN] No supported Logitech wheel detected`**
+- Plug in the wheel before launching the tool, or restart the tool after plugging in.
 
 **Wrong port**
 - Make sure the port in Forza's settings matches `UDP_PORT` in the script (default: `5607`).
@@ -152,49 +156,39 @@ Offset  Size  Type   Field
 
 ### 4. LED logic
 
-From the three RPM values the script computes which of the **5 LEDs** to light up via a single SDK call:
+From the RPM values the script computes a 5-bit bitmask and sends it directly to the wheel:
 
 ```python
-min_rpm = max_rpm * LED_MIN_RPM_RATIO   # e.g. 70 % of redline
-LogiSetSteeringWheelRpmLeds(index, currentRPM, min_rpm, max_rpm)
+min_rpm  = max_rpm * 0.70   # first LED lights at 70 % of redline
+bitmask  = rpm_to_bitmask(current_rpm, min_rpm, max_rpm)
+# e.g. 0b00111 = LEDs 1-2-3 on, 4-5 off
 ```
 
-The SDK maps `[min_rpm … max_rpm]` linearly across however many LEDs the wheel has:
-
 ```
-G920 / G27 (5 LEDs)
 min_rpm ──────────────────────────── max_rpm
   ○ ○ ○ ○ ○  →  ● ○ ○ ○ ○  →  ● ● ● ● ●
-
-G29 (11 LEDs, green → yellow → red)
-min_rpm ──────────────────────────── max_rpm
-  ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○  →  ● ● ● ● ● ● ● ● ● ● ●
-  (all off)                   (all on: 🟢🟢🟡🟡🔴🔴🔴🟡🟡🟢🟢)
 ```
 
-When `currentRPM ≥ 97 % of max_rpm` (rev-limiter zone), the script **ignores the SDK's progressive mode** and flashes all LEDs on/off at 10 Hz instead:
+When `currentRPM ≥ 97 % of max_rpm` (rev-limiter zone), all LEDs flash on/off at 10 Hz.
 
-```python
-action, blink_phase, last_blink = compute_led_state(
-    current_rpm, max_rpm, blink_phase, last_blink, now,
-    blink_thresh, blink_interval
-)
-# → LED_NORMAL | LED_BLINK_ON | LED_BLINK_OFF | LED_OFF
+### 5. USB HID command
+
+The G29 and G920 accept LED commands via a 7-byte HID output report (confirmed from the Linux kernel `hid-lg4ff.c`):
+
+```
+Byte 0: 0xF8   — extended command prefix
+Byte 1: 0x12   — LED control sub-command
+Byte 2: bitmask (bit 0 = LED 1 leftmost … bit 4 = LED 5 rightmost)
+Byte 3-6: 0x00
 ```
 
-### 5. Logitech SDK call chain
+This is sent directly via the `hid` Python library (HIDAPI wrapper), bypassing G HUB entirely.
 
 ```
 forza_wheel_leds.py
   │
-  ├── ctypes.CDLL("LogitechSteeringWheelEnginesWrapper.dll")
-  │       │
-  │       ├── LogiSteeringInitialize()   — connects to G HUB service
-  │       ├── LogiIsConnected(0)         — checks wheel presence
-  │       └── LogiSetSteeringWheelRpmLeds(index, current, min, max)
-  │               └── G HUB driver → USB HID command → G920 LEDs
+  ├── socket.recvfrom(2048)    — UDP listener (blocking, 1 s timeout)
   │
-  └── socket.recvfrom(2048)             — UDP listener (blocking, 1 s timeout)
+  └── hid.device().write([0x00, 0xF8, 0x12, bitmask, 0, 0, 0, 0])
+          └── USB HID output report → G29 / G920 LEDs
 ```
-
-The DLL communicates with the **Logitech G HUB** background service over a local pipe. G HUB then sends the LED state to the wheel over USB HID. This is why G HUB must be running — the DLL itself has no direct USB access.

@@ -1,23 +1,19 @@
 """
 Unit tests for forza_wheel_leds.py — targeting 100 % line coverage.
 
-All tests run without a Logitech DLL, a UDP socket, or a running game.
-System-level functions (load_logitech_sdk, main) are tested via mocks.
+All tests run without a HID device, a UDP socket, or a running game.
 """
 
-import os
 import socket
 import struct
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 # ---------------------------------------------------------------------------
 # Helpers to build valid Forza UDP packets for testing
 # ---------------------------------------------------------------------------
 
-# The DASH_FORMAT struct packs to 311 bytes.
-# We build a minimal 311-byte buffer and inject it into a raw packet.
 DASH_FORMAT = (
     "<iI"
     "fff"
@@ -31,34 +27,6 @@ DASH_FORMAT = (
 )
 
 
-def _make_patched_buffer(
-    is_race_on: int = 1,
-    max_rpm: float = 8000.0,
-    idle_rpm: float = 800.0,
-    current_rpm: float = 5000.0,
-    gear: int = 3,
-) -> bytes:
-    """Build a 311-byte buffer matching DASH_FORMAT with the given fields."""
-    # Count how many fields the format expects
-    n_floats_ints = struct.calcsize(DASH_FORMAT)  # should be 311
-    # Build a list of zero values then override the ones we care about
-    # Field layout (0-indexed):
-    #  0 = IsRaceOn (i), 1 = TimestampMS (I)
-    #  2 = EngineMaxRpm, 3 = EngineIdleRpm, 4 = CurrentEngineRpm (f)
-    #  ... many zeros ...
-    #  81 = Gear (5th B in the BBBBB block)
-    values = [0] * 300  # more than enough
-
-    values[0] = is_race_on
-    values[1] = 12345          # TimestampMS
-    values[2] = max_rpm
-    values[3] = idle_rpm
-    values[4] = current_rpm
-    # gear sits at index 81 in the unpacked tuple
-    # We'll inject it by packing the full struct manually
-    return None  # replaced by _pack_packet below
-
-
 def _pack_packet(
     is_race_on: int = 1,
     max_rpm: float = 8000.0,
@@ -67,29 +35,20 @@ def _pack_packet(
     gear: int = 3,
     raw_size: int = 323,
 ) -> bytes:
-    """
-    Build a raw Forza UDP packet of `raw_size` bytes with the gap at 232–243.
-    The struct is packed at offset 0..231 and 244..end, with zeros for the gap.
-    """
-    # Pack the full DASH_FORMAT struct (311 bytes)
-    # We need values for every field; only a few matter for our tests.
-    # 85 fields total in DASH_FORMAT as written in forza_wheel_leds.py.
-    # Let's count them:
     fmt_fields = struct.unpack_from(DASH_FORMAT, bytes(311))
     n = len(fmt_fields)
 
     vals = [0] * n
-    vals[0] = is_race_on       # IsRaceOn
-    vals[1] = 0                # TimestampMS
-    vals[2] = max_rpm          # EngineMaxRpm
-    vals[3] = idle_rpm         # EngineIdleRpm
-    vals[4] = current_rpm      # CurrentEngineRpm
-    vals[81] = gear            # Gear (5th byte in BBBBB block)
+    vals[0] = is_race_on
+    vals[1] = 0
+    vals[2] = max_rpm
+    vals[3] = idle_rpm
+    vals[4] = current_rpm
+    vals[81] = gear
 
-    patched = struct.pack(DASH_FORMAT, *vals)  # 311 bytes
+    patched = struct.pack(DASH_FORMAT, *vals)
     assert len(patched) == 311
 
-    # Re-insert the 12-byte gap: first 232 bytes + 12 zero bytes + rest
     gap = b"\x00" * 12
     raw_323 = patched[:232] + gap + patched[232:]
     assert len(raw_323) == 323
@@ -103,7 +62,7 @@ def _pack_packet(
 
 
 # ---------------------------------------------------------------------------
-# Import the module under test (no DLL needed — we mock ctypes.CDLL)
+# Import module under test
 # ---------------------------------------------------------------------------
 
 import forza_wheel_leds as fwl
@@ -152,12 +111,105 @@ class TestPatchAndParse(unittest.TestCase):
         self.assertEqual(result["gear"], 0)
 
     def test_returns_none_on_struct_error(self):
-        # 323 bytes but all zeros — struct.unpack_from will succeed (zeros are valid),
-        # so we test with a buffer that's too short after patching by
-        # monkeypatching struct.unpack_from to raise
         pkt = _pack_packet(raw_size=323)
         with patch("struct.unpack_from", side_effect=struct.error("bad")):
             self.assertIsNone(fwl.patch_and_parse(pkt))
+
+
+# ---------------------------------------------------------------------------
+# Tests: rpm_to_bitmask
+# ---------------------------------------------------------------------------
+
+class TestRpmToBitmask(unittest.TestCase):
+
+    def test_zero_when_below_min(self):
+        self.assertEqual(fwl.rpm_to_bitmask(1000, 5600, 8000), 0x00)
+
+    def test_all_on_when_at_max(self):
+        self.assertEqual(fwl.rpm_to_bitmask(8000, 5600, 8000), fwl.ALL_LEDS_ON)
+
+    def test_all_on_when_above_max(self):
+        self.assertEqual(fwl.rpm_to_bitmask(9000, 5600, 8000), fwl.ALL_LEDS_ON)
+
+    def test_at_min_gives_zero(self):
+        self.assertEqual(fwl.rpm_to_bitmask(5600, 5600, 8000), 0x00)
+
+    def test_progressive_middle(self):
+        # midpoint → roughly half the LEDs
+        result = fwl.rpm_to_bitmask(6800, 5600, 8000)
+        self.assertGreater(result, 0x00)
+        self.assertLess(result, fwl.ALL_LEDS_ON)
+
+    def test_max_equals_min_returns_zero(self):
+        # degenerate case: max_rpm <= min_rpm
+        self.assertEqual(fwl.rpm_to_bitmask(5000, 5000, 5000), 0x00)
+
+    def test_just_above_min_gives_one_led(self):
+        result = fwl.rpm_to_bitmask(5601, 5600, 8000)
+        self.assertEqual(result, 0x01)
+
+
+# ---------------------------------------------------------------------------
+# Tests: _send_led_report
+# ---------------------------------------------------------------------------
+
+class TestSendLedReport(unittest.TestCase):
+
+    def test_writes_correct_report(self):
+        dev = MagicMock()
+        fwl._send_led_report(dev, 0x1F)
+        dev.write.assert_called_once_with(
+            [0x00, 0xF8, 0x12, 0x1F, 0x00, 0x00, 0x00, 0x00]
+        )
+
+    def test_bitmask_masked_to_byte(self):
+        dev = MagicMock()
+        fwl._send_led_report(dev, 0x1FF)  # only lowest 8 bits used
+        args = dev.write.call_args[0][0]
+        self.assertEqual(args[3], 0xFF)
+
+
+# ---------------------------------------------------------------------------
+# Tests: open_wheel
+# ---------------------------------------------------------------------------
+
+class TestOpenWheel(unittest.TestCase):
+
+    def test_returns_device_when_first_pid_matches(self):
+        mock_dev = MagicMock()
+        mock_hid = MagicMock()
+        mock_hid.device.return_value = mock_dev
+
+        result = fwl.open_wheel(mock_hid)
+        self.assertIs(result, mock_dev)
+        mock_dev.open.assert_called_once_with(fwl.LOGITECH_VID, fwl.WHEEL_PIDS[0])
+        mock_dev.set_nonblocking.assert_called_once_with(1)
+
+    def test_tries_second_pid_when_first_fails(self):
+        mock_dev = MagicMock()
+        mock_hid = MagicMock()
+        call_count = [0]
+
+        def make_device():
+            d = MagicMock()
+            call_count[0] += 1
+            if call_count[0] == 1:
+                d.open.side_effect = OSError("not found")
+            return d
+
+        mock_hid.device.side_effect = make_device
+        # The second device (G920) should succeed
+        result = fwl.open_wheel(mock_hid)
+        self.assertIsNotNone(result)
+
+    def test_returns_none_when_no_wheel_found(self):
+        mock_hid = MagicMock()
+        dev = MagicMock()
+        dev.open.side_effect = OSError("not found")
+        mock_hid.device.return_value = dev
+
+        result = fwl.open_wheel(mock_hid)
+        self.assertIsNone(result)
 
 
 # ---------------------------------------------------------------------------
@@ -181,13 +233,11 @@ class TestComputeLedState(unittest.TestCase):
         self.assertFalse(phase)
 
     def test_normal_zone_resets_blink_phase(self):
-        # Even if blink_phase was True, normal zone resets it
         action, phase, lb = self._call(5000, 8000, True, 0.0, 1.0)
         self.assertEqual(action, fwl.LED_NORMAL)
         self.assertFalse(phase)
 
     def test_blink_zone_toggles_after_interval(self):
-        # Phase starts False, interval elapsed → toggle to True → LED_BLINK_ON
         action, phase, lb = self._call(
             current_rpm=7800, max_rpm=8000,
             blink_phase=False, last_blink=0.0, now=1.0,
@@ -198,7 +248,6 @@ class TestComputeLedState(unittest.TestCase):
         self.assertEqual(lb, 1.0)
 
     def test_blink_zone_no_toggle_before_interval(self):
-        # Interval not elapsed → phase stays False → LED_BLINK_OFF
         action, phase, lb = self._call(
             current_rpm=7800, max_rpm=8000,
             blink_phase=False, last_blink=0.99, now=1.0,
@@ -206,7 +255,7 @@ class TestComputeLedState(unittest.TestCase):
         )
         self.assertEqual(action, fwl.LED_BLINK_OFF)
         self.assertFalse(phase)
-        self.assertEqual(lb, 0.99)  # unchanged
+        self.assertEqual(lb, 0.99)
 
     def test_blink_zone_phase_true_gives_blink_on(self):
         action, phase, lb = self._call(
@@ -217,7 +266,6 @@ class TestComputeLedState(unittest.TestCase):
         self.assertEqual(action, fwl.LED_BLINK_ON)
 
     def test_blink_zone_toggle_off(self):
-        # Phase is True, interval elapsed → toggle to False → LED_BLINK_OFF
         action, phase, lb = self._call(
             current_rpm=7800, max_rpm=8000,
             blink_phase=True, last_blink=0.0, now=1.0,
@@ -227,7 +275,6 @@ class TestComputeLedState(unittest.TestCase):
         self.assertFalse(phase)
 
     def test_exactly_at_blink_thresh(self):
-        # RPM exactly at threshold → blink zone
         action, _, _ = self._call(
             current_rpm=7760, max_rpm=8000,
             blink_phase=False, last_blink=0.0, now=1.0,
@@ -242,108 +289,30 @@ class TestComputeLedState(unittest.TestCase):
 
 class TestApplyLedAction(unittest.TestCase):
 
-    def _mock_dll(self):
-        dll = MagicMock()
-        dll.LogiPlayLeds = MagicMock()
-        return dll
+    def test_led_off_sends_all_off(self):
+        dev = MagicMock()
+        fwl.apply_led_action(dev, fwl.LED_OFF, 0, 0, 0)
+        dev.write.assert_called_once()
+        self.assertEqual(dev.write.call_args[0][0][3], fwl.ALL_LEDS_OFF)
 
-    def test_led_off_calls_leds_off(self):
-        dll = self._mock_dll()
-        fwl.apply_led_action(dll, fwl.LED_OFF, 0, 0, 0)
-        dll.LogiPlayLeds.assert_called_once()
-        args = dll.LogiPlayLeds.call_args[0]
-        # currentRPM arg should be 0.0
-        self.assertAlmostEqual(float(args[1].value), 0.0)
+    def test_led_blink_off_sends_all_off(self):
+        dev = MagicMock()
+        fwl.apply_led_action(dev, fwl.LED_BLINK_OFF, 0, 0, 0)
+        dev.write.assert_called_once()
+        self.assertEqual(dev.write.call_args[0][0][3], fwl.ALL_LEDS_OFF)
 
-    def test_led_blink_off_calls_leds_off(self):
-        dll = self._mock_dll()
-        fwl.apply_led_action(dll, fwl.LED_BLINK_OFF, 0, 0, 0)
-        dll.LogiPlayLeds.assert_called_once()
-        args = dll.LogiPlayLeds.call_args[0]
-        self.assertAlmostEqual(float(args[1].value), 0.0)
+    def test_led_blink_on_sends_all_on(self):
+        dev = MagicMock()
+        fwl.apply_led_action(dev, fwl.LED_BLINK_ON, 0, 0, 0)
+        dev.write.assert_called_once()
+        self.assertEqual(dev.write.call_args[0][0][3], fwl.ALL_LEDS_ON)
 
-    def test_led_blink_on_calls_leds_on(self):
-        dll = self._mock_dll()
-        fwl.apply_led_action(dll, fwl.LED_BLINK_ON, 0, 0, 0)
-        dll.LogiPlayLeds.assert_called_once()
-        args = dll.LogiPlayLeds.call_args[0]
-        # currentRPM arg should be 1.0 (all on)
-        self.assertAlmostEqual(float(args[1].value), 1.0)
-
-    def test_led_normal_passes_rpm_values(self):
-        dll = self._mock_dll()
-        fwl.apply_led_action(dll, fwl.LED_NORMAL, 6000.0, 5600.0, 8000.0)
-        dll.LogiPlayLeds.assert_called_once()
-        args = dll.LogiPlayLeds.call_args[0]
-        self.assertAlmostEqual(float(args[1].value), 6000.0)
-        self.assertAlmostEqual(float(args[2].value), 5600.0)
-        self.assertAlmostEqual(float(args[3].value), 8000.0)
-
-
-# ---------------------------------------------------------------------------
-# Tests: leds_off / leds_on
-# ---------------------------------------------------------------------------
-
-class TestLedsHelpers(unittest.TestCase):
-
-    def _mock_dll(self):
-        dll = MagicMock()
-        dll.LogiPlayLeds = MagicMock()
-        return dll
-
-    def test_leds_off(self):
-        dll = self._mock_dll()
-        fwl.leds_off(dll)
-        dll.LogiPlayLeds.assert_called_once()
-        args = dll.LogiPlayLeds.call_args[0]
-        self.assertAlmostEqual(float(args[1].value), 0.0)  # currentRPM = 0
-
-    def test_leds_on(self):
-        dll = self._mock_dll()
-        fwl.leds_on(dll)
-        dll.LogiPlayLeds.assert_called_once()
-        args = dll.LogiPlayLeds.call_args[0]
-        self.assertAlmostEqual(float(args[1].value), 1.0)  # currentRPM = 1
-
-
-# ---------------------------------------------------------------------------
-# Tests: _dll_path
-# ---------------------------------------------------------------------------
-
-class TestDllPath(unittest.TestCase):
-
-    def test_frozen_uses_executable_dir(self):
-        with patch.object(sys, "frozen", True, create=True), \
-             patch.object(sys, "executable", "/some/dir/forza_wheel_leds.exe"):
-            path = fwl._dll_path()
-        self.assertEqual(path, os.path.join("/some/dir", fwl.DLL_NAME))
-
-    def test_script_uses_file_dir(self):
-        with patch.object(sys, "frozen", False, create=True):
-            path = fwl._dll_path()
-        expected_dir = os.path.dirname(os.path.abspath(fwl.__file__))
-        self.assertEqual(path, os.path.join(expected_dir, fwl.DLL_NAME))
-
-
-# ---------------------------------------------------------------------------
-# Tests: load_logitech_sdk
-# ---------------------------------------------------------------------------
-
-class TestLoadLogitechSdk(unittest.TestCase):
-
-    def test_exits_when_dll_not_found(self):
-        with patch("ctypes.CDLL", side_effect=OSError("not found")), \
-             patch("builtins.input"):
-            with self.assertRaises(SystemExit):
-                fwl.load_logitech_sdk()
-
-    def test_returns_dll_and_sets_types(self):
-        mock_dll = MagicMock()
-        with patch("ctypes.CDLL", return_value=mock_dll):
-            result = fwl.load_logitech_sdk()
-        self.assertIs(result, mock_dll)
-        self.assertIsNotNone(mock_dll.LogiSteeringInitialize.restype)
-        self.assertIsNotNone(mock_dll.LogiSteeringInitialize.argtypes)
+    def test_led_normal_sends_computed_bitmask(self):
+        dev = MagicMock()
+        fwl.apply_led_action(dev, fwl.LED_NORMAL, 8000.0, 5600.0, 8000.0)
+        dev.write.assert_called_once()
+        # At max RPM all LEDs should be on
+        self.assertEqual(dev.write.call_args[0][0][3], fwl.ALL_LEDS_ON)
 
 
 # ---------------------------------------------------------------------------
@@ -351,21 +320,16 @@ class TestLoadLogitechSdk(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestMain(unittest.TestCase):
-    """
-    Test main() end-to-end using mocks for the DLL and the UDP socket.
-    We exercise all branches: DLL warn, wheel not detected, timeout,
-    unknown packet, no race, normal RPM, redline blink, KeyboardInterrupt.
-    """
 
-    def _run_main(self, packets, dll_init=True, wheel_connected=True,
-                  dll_load_ok=True):
-        """
-        Run main() with injected packets (list of bytes or socket.timeout).
-        Returns after all packets are consumed (raises StopIteration → caught).
-        """
-        mock_dll = MagicMock()
-        mock_dll.LogiSteeringInitialize.return_value = dll_init
-        mock_dll.LogiIsConnected.return_value = wheel_connected
+    def _run_main(self, packets, wheel_found=True, hid_available=True):
+        mock_dev = MagicMock()
+        mock_hid = MagicMock()
+        if wheel_found:
+            mock_hid.device.return_value = mock_dev
+        else:
+            mock_dev_fail = MagicMock()
+            mock_dev_fail.open.side_effect = OSError("not found")
+            mock_hid.device.return_value = mock_dev_fail
 
         mock_sock = MagicMock()
         recv_iter = iter(packets)
@@ -374,40 +338,32 @@ class TestMain(unittest.TestCase):
             try:
                 item = next(recv_iter)
             except StopIteration:
-                raise KeyboardInterrupt  # cleanly exits main loop
+                raise KeyboardInterrupt
             if item is socket.timeout:
                 raise socket.timeout
             return item, ("127.0.0.1", 5607)
 
         mock_sock.recvfrom.side_effect = fake_recvfrom
 
-        with patch("ctypes.CDLL", return_value=mock_dll), \
-             patch("socket.socket", return_value=mock_sock), \
-             patch("time.sleep"), \
+        hid_import = mock_hid if hid_available else None
+
+        def fake_import(name, *args, **kwargs):
+            if name == "hid":
+                if not hid_available:
+                    raise ImportError("no hid")
+                return mock_hid
+            return original_import(name, *args, **kwargs)
+
+        original_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
+
+        with patch("socket.socket", return_value=mock_sock), \
+             patch("time.sleep", return_value=None), \
              patch("time.time", return_value=100.0), \
-             patch("builtins.input"):
+             patch("builtins.input"), \
+             patch("builtins.__import__", side_effect=fake_import):
             fwl.main()
 
-        return mock_dll
-
-    def test_main_finally_handles_dll_and_sock_errors(self):
-        """Cover the except-pass branches in finally when dll/sock calls raise."""
-        mock_dll = MagicMock()
-        mock_dll.LogiSteeringInitialize.return_value = True
-        mock_dll.LogiIsConnected.return_value = True
-        mock_dll.LogiPlayLeds.side_effect = Exception("dll error")
-        mock_dll.LogiSteeringShutdown.side_effect = Exception("shutdown error")
-
-        mock_sock = MagicMock()
-        mock_sock.recvfrom.side_effect = KeyboardInterrupt
-        mock_sock.close.side_effect = Exception("close error")
-
-        with patch("ctypes.CDLL", return_value=mock_dll), \
-             patch("socket.socket", return_value=mock_sock), \
-             patch("time.sleep"), \
-             patch("time.time", return_value=100.0), \
-             patch("builtins.input"):
-            fwl.main()  # should not raise despite all the side_effects
+        return mock_dev
 
     def test_main_normal_race(self):
         pkt = _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=5000,
@@ -420,18 +376,15 @@ class TestMain(unittest.TestCase):
         self._run_main([pkt])
 
     def test_main_no_race_but_driving(self):
-        # IsRaceOn=0 (free roam) but max_rpm > 0 → LEDs should still work
         pkt = _pack_packet(is_race_on=0, max_rpm=8000, current_rpm=4000,
                            gear=3, raw_size=323)
         self._run_main([pkt])
 
     def test_main_max_rpm_zero_turns_leds_off(self):
-        # max_rpm=0 → LEDs off (in menu, no car loaded)
         pkt = _pack_packet(is_race_on=1, max_rpm=0, current_rpm=0, raw_size=323)
         self._run_main([pkt])
 
     def test_main_redline_blink(self):
-        # current_rpm >= 97% of max → blink zone
         pkt = _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=7800,
                            gear=6, raw_size=323)
         self._run_main([pkt])
@@ -452,25 +405,100 @@ class TestMain(unittest.TestCase):
                            raw_size=323)
         self._run_main([bad, pkt])
 
-    def test_main_dll_init_warns(self):
-        pkt = _pack_packet(raw_size=323)
-        self._run_main([pkt], dll_init=False)
-
-    def test_main_wheel_not_connected_warns(self):
-        pkt = _pack_packet(raw_size=323)
-        self._run_main([pkt], wheel_connected=False)
-
     def test_main_game_detected_printed_once(self):
-        # Two packets from the same game → game label printed only once
         pkt = _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=5000,
                            raw_size=323)
         self._run_main([pkt, pkt])
 
     def test_main_second_game_triggers_new_label(self):
-        # First FH5/FH6 packet, then FM2023 packet → two game labels
         pkt1 = _pack_packet(raw_size=323)
         pkt2 = _pack_packet(raw_size=331)
         self._run_main([pkt1, pkt2])
+
+    def test_main_no_wheel_on_start(self):
+        """Wheel not plugged in at start → dev is None, LEDs skipped."""
+        pkt = _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=5000,
+                           raw_size=323)
+        self._run_main([pkt], wheel_found=False)
+
+    def test_main_wheel_reconnects_during_loop(self):
+        """dev starts None (startup fails), wheel found on first packet retry."""
+        pkt = _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=5000,
+                           raw_size=323)
+
+        mock_hid = MagicMock()
+        # open_wheel tries WHEEL_PIDS in order; each call to hid.device() returns a new obj.
+        # Startup: both PIDs fail → open_wheel returns None.
+        # Loop retry: first PID succeeds → open_wheel returns dev_ok.
+        dev_fail1 = MagicMock(); dev_fail1.open.side_effect = OSError("nf")
+        dev_fail2 = MagicMock(); dev_fail2.open.side_effect = OSError("nf")
+        dev_ok    = MagicMock()  # .open succeeds by default
+        mock_hid.device.side_effect = [dev_fail1, dev_fail2, dev_ok]
+
+        mock_sock = MagicMock()
+        recv_iter = iter([pkt])
+
+        def fake_recvfrom(_):
+            try:
+                item = next(recv_iter)
+            except StopIteration:
+                raise KeyboardInterrupt
+            return item, ("127.0.0.1", 5607)
+
+        mock_sock.recvfrom.side_effect = fake_recvfrom
+
+        original_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "hid":
+                return mock_hid
+            return original_import(name, *args, **kwargs)
+
+        with patch("socket.socket", return_value=mock_sock), \
+             patch("time.sleep", return_value=None), \
+             patch("time.time", return_value=100.0), \
+             patch("builtins.input"), \
+             patch("builtins.__import__", side_effect=fake_import):
+            fwl.main()
+
+        # LED report sent after reconnect confirms line 347 was reached
+        dev_ok.write.assert_called()
+
+    def test_main_max_rpm_zero_no_wheel(self):
+        """max_rpm=0 with no wheel — LEDs skip gracefully."""
+        pkt = _pack_packet(is_race_on=1, max_rpm=0, current_rpm=0, raw_size=323)
+        self._run_main([pkt], wheel_found=False)
+
+    def test_main_hid_not_installed(self):
+        """ImportError on 'hid' → sys.exit(1)."""
+        with self.assertRaises(SystemExit):
+            self._run_main([], hid_available=False)
+
+    def test_main_finally_handles_errors(self):
+        """Cover except-pass branches in finally when dev/sock calls raise."""
+        mock_dev = MagicMock()
+        mock_dev.write.side_effect = Exception("write error")
+        mock_dev.close.side_effect = Exception("close error")
+        mock_hid = MagicMock()
+        mock_hid.device.return_value = mock_dev
+
+        mock_sock = MagicMock()
+        mock_sock.recvfrom.side_effect = KeyboardInterrupt
+        mock_sock.close.side_effect = Exception("close error")
+
+        def fake_import(name, *args, **kwargs):
+            if name == "hid":
+                return mock_hid
+            return original_import(name, *args, **kwargs)
+
+        original_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
+
+        with patch("socket.socket", return_value=mock_sock), \
+             patch("time.sleep", return_value=None), \
+             patch("time.time", return_value=100.0), \
+             patch("builtins.input"), \
+             patch("builtins.__import__", side_effect=fake_import):
+            fwl.main()  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -479,11 +507,9 @@ class TestMain(unittest.TestCase):
 
 class TestEntryPoint(unittest.TestCase):
     def test_main_called_when_run_as_script(self):
-        """Cover the `if __name__ == '__main__': main()` guard."""
         with patch.object(fwl, "main") as mock_main, \
              patch.object(fwl, "__name__", "__main__"):
-            # Re-execute the guard block directly
-            exec(  # noqa: S102
+            exec(
                 "if __name__ == '__main__': main()",
                 {**vars(fwl), "__name__": "__main__", "main": mock_main},
             )
