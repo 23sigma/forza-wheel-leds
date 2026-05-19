@@ -32,8 +32,8 @@ import time
 
 UDP_PORT          = 5607   # Must match the port set in-game
 UDP_IP            = "0.0.0.0"
-LED_MIN_RPM_RATIO = 0.50   # First LED lights at this fraction of redline
-BLINK_RPM_RATIO   = 0.97   # All LEDs blink above this fraction of redline
+LED_MIN_RPM_RATIO = 0.65   # First LED lights at this fraction of redline
+BLINK_RPM_RATIO   = 0.87   # All LEDs blink above this fraction of redline
 BLINK_HZ          = 10.0   # Blink frequency in Hz
 
 CONFIG_FILENAME = "config.ini"
@@ -318,7 +318,7 @@ def main() -> None:
     print("=" * 58)
     print("  forza-wheel-leds  |  Logitech G29 / G920 RPM LEDs")
     print("=" * 58)
-    print(f"  Version        : 1.3.0")
+    print(f"  Version        : 1.3.1")
     print(f"  Config         : {cfg_source}")
     print(f"  Listening on   : {UDP_IP}:{udp_port}")
     print(f"  LED min RPM    : {int(led_min_rpm_ratio * 100)} % of redline")

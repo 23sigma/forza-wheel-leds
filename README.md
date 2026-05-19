@@ -112,10 +112,10 @@ Edit it with any text editor — **no recompile needed**.
 udp_port = 5607
 
 ; Fraction of max RPM at which the FIRST LED lights up (0.0 – 1.0)
-led_min_rpm_ratio = 0.50
+led_min_rpm_ratio = 0.65
 
 ; Rev-limiter blink: all LEDs flash above this fraction of max RPM (0.0 – 1.0)
-blink_rpm_ratio = 0.97
+blink_rpm_ratio = 0.87
 
 ; Blink frequency in Hz
 blink_hz = 10
@@ -187,7 +187,7 @@ Offset  Size  Type   Field
 From the RPM values the script computes a 5-bit bitmask and sends it directly to the wheel:
 
 ```python
-min_rpm  = max_rpm * 0.70   # first LED lights at 70 % of redline
+min_rpm  = max_rpm * 0.65   # first LED lights at 65 % of redline
 bitmask  = rpm_to_bitmask(current_rpm, min_rpm, max_rpm)
 # e.g. 0b00111 = LEDs 1-2-3 on, 4-5 off
 ```
@@ -197,7 +197,7 @@ min_rpm ────────────────────────
   ○ ○ ○ ○ ○  →  ● ○ ○ ○ ○  →  ● ● ● ● ●
 ```
 
-When `currentRPM ≥ 97 % of max_rpm` (rev-limiter zone), all LEDs flash on/off at 10 Hz.
+When `currentRPM ≥ 87 % of max_rpm` (rev-limiter zone), all LEDs flash on/off at 10 Hz.
 
 ### 5. USB HID command
 

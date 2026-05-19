@@ -337,7 +337,7 @@ class TestComputeLedState(unittest.TestCase):
     def _call(self, current_rpm, max_rpm, blink_phase, last_blink, now,
               blink_thresh=None, blink_interval=0.1):
         if blink_thresh is None:
-            blink_thresh = max_rpm * 0.97
+            blink_thresh = max_rpm * fwl.BLINK_RPM_RATIO
         return fwl.compute_led_state(
             current_rpm, max_rpm, blink_phase, last_blink, now,
             blink_thresh, blink_interval,
