@@ -5,6 +5,7 @@ All tests run without a Logitech DLL, a UDP socket, or a running game.
 System-level functions (load_logitech_sdk, main) are tested via mocks.
 """
 
+import os
 import socket
 import struct
 import sys
@@ -306,13 +307,33 @@ class TestLedsHelpers(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Tests: _dll_path
+# ---------------------------------------------------------------------------
+
+class TestDllPath(unittest.TestCase):
+
+    def test_frozen_uses_executable_dir(self):
+        with patch.object(sys, "frozen", True, create=True), \
+             patch.object(sys, "executable", "/some/dir/forza_wheel_leds.exe"):
+            path = fwl._dll_path()
+        self.assertEqual(path, os.path.join("/some/dir", fwl.DLL_NAME))
+
+    def test_script_uses_file_dir(self):
+        with patch.object(sys, "frozen", False, create=True):
+            path = fwl._dll_path()
+        expected_dir = os.path.dirname(os.path.abspath(fwl.__file__))
+        self.assertEqual(path, os.path.join(expected_dir, fwl.DLL_NAME))
+
+
+# ---------------------------------------------------------------------------
 # Tests: load_logitech_sdk
 # ---------------------------------------------------------------------------
 
 class TestLoadLogitechSdk(unittest.TestCase):
 
     def test_exits_when_dll_not_found(self):
-        with patch("ctypes.CDLL", side_effect=OSError("not found")):
+        with patch("ctypes.CDLL", side_effect=OSError("not found")), \
+             patch("builtins.input"):
             with self.assertRaises(SystemExit):
                 fwl.load_logitech_sdk()
 
@@ -321,7 +342,6 @@ class TestLoadLogitechSdk(unittest.TestCase):
         with patch("ctypes.CDLL", return_value=mock_dll):
             result = fwl.load_logitech_sdk()
         self.assertIs(result, mock_dll)
-        # Check that argtypes / restype were configured
         self.assertIsNotNone(mock_dll.LogiSteeringInitialize.restype)
         self.assertIsNotNone(mock_dll.LogiSteeringInitialize.argtypes)
 

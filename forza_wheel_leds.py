@@ -19,6 +19,7 @@ In-game setup (all supported Forza titles):
 """
 
 import ctypes
+import os
 import socket
 import struct
 import sys
@@ -53,14 +54,31 @@ WHEEL_INDEX = 0       # 0 = first connected Logitech wheel
 DLL_NAME = "LogitechSteeringWheelEnginesWrapper.dll"
 
 
+def _dll_path() -> str:
+    """
+    Resolve the absolute path to the DLL.
+    - When running as a PyInstaller .exe: look next to the .exe (sys.executable)
+    - When running as a .py script:       look next to the script (__file__)
+    """
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, DLL_NAME)
+
+
 def load_logitech_sdk() -> ctypes.CDLL:
+    path = _dll_path()
     try:
-        dll = ctypes.CDLL(DLL_NAME)
+        dll = ctypes.CDLL(path)
     except OSError:
         print(f"[ERROR] Could not load '{DLL_NAME}'.")
-        print("        Place the DLL in the same folder as this script / .exe.")
-        print("        Download the Logitech Steering Wheel SDK:")
-        print("        https://www.logitechg.com/sdk/LogitechSteeringWheelSDK_8.75.30.zip")
+        print(f"        Expected path: {path}")
+        print()
+        print("        Make sure the DLL is in the same folder as the .exe.")
+        print("        It should have been included in the release zip.")
+        print()
+        input("  Press Enter to close this window …")
         sys.exit(1)
 
     dll.LogiSteeringInitialize.restype  = ctypes.c_bool
