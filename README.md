@@ -144,3 +144,100 @@ WHEEL_INDEX       = 0      # 0 = first connected Logitech wheel
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+---
+
+## Under the hood
+
+### 1. The UDP telemetry stream
+
+When **Data Out** is enabled, Forza broadcasts one binary UDP datagram per physics tick (~60 Hz) to the configured IP:port. The packet is a flat C struct serialized in **little-endian** byte order.
+
+FH5 and FH6 send **323 bytes** per packet. FM2023 sends **331 bytes** (8 extra bytes at the end for tire wear and track ID).
+
+### 2. The 12-byte gap (FH4/FH5/FH6 quirk)
+
+The packet is not a single contiguous struct. **Bytes 232–243 are padding** inserted by Playground Games — they contain no useful data. Before parsing, the script removes them:
+
+```
+Raw packet (323 bytes):
+[  0 ────────────── 231 ][ 232 ─ 243 ][ 244 ──────────── 322 ]
+        sled fields        12-byte gap      dash-only fields
+
+After patch (311 bytes):
+[  0 ────────────── 231 ][ 232 ──────────────────────────── 310 ]
+        sled fields              dash-only fields (shifted)
+```
+
+```python
+patched = data[:232] + data[244:323]   # skip bytes 232–243
+```
+
+### 3. Packet layout (key fields)
+
+The 311-byte patched buffer maps to 85 little-endian fields. Here are the ones used by this script:
+
+```
+Offset  Size  Type   Field
+──────  ────  ─────  ────────────────────────
+0       4     s32    IsRaceOn       — 1 = driving, 0 = menus
+                                     Note: 0 also in free roam (FH series)
+                                     → script only checks max_rpm > 0
+4       4     u32    TimestampMS    — millisecond counter (unused)
+8       4     f32    EngineMaxRpm   — redline RPM of the current car
+12      4     f32    EngineIdleRpm  — idle RPM (unused)
+16      4     f32    CurrentEngineRpm — live RPM
+...     ...   ...    (53 other fields: suspension, tyres, speed, position…)
+244     4     f32    Speed          — m/s
+252     4     f32    Power          — watts
+256     4     f32    Torque         — N·m
+...     ...   ...
+296     1     u8     Gear           — 0 = reverse, 1–10 = forward gears
+...
+```
+
+> Full struct definition: [`forza_wheel_leds.py` → `DASH_FORMAT`](forza_wheel_leds.py)
+
+### 4. LED logic
+
+From the three RPM values the script computes which of the **5 LEDs** to light up via a single SDK call:
+
+```python
+min_rpm = max_rpm * LED_MIN_RPM_RATIO   # e.g. 70 % of redline
+LogiSetSteeringWheelRpmLeds(index, currentRPM, min_rpm, max_rpm)
+```
+
+The SDK maps `[min_rpm … max_rpm]` linearly across the 5 LEDs:
+
+```
+min_rpm ──────────────────────────────── max_rpm
+  ○ ○ ○ ○ ○   →   ● ○ ○ ○ ○   →   ● ● ● ● ●
+  (no LEDs)       (1st LED on)     (all 5 on)
+```
+
+When `currentRPM ≥ 97 % of max_rpm` (rev-limiter zone), the script **ignores the SDK's progressive mode** and flashes all LEDs on/off at 10 Hz instead:
+
+```python
+action, blink_phase, last_blink = compute_led_state(
+    current_rpm, max_rpm, blink_phase, last_blink, now,
+    blink_thresh, blink_interval
+)
+# → LED_NORMAL | LED_BLINK_ON | LED_BLINK_OFF | LED_OFF
+```
+
+### 5. Logitech SDK call chain
+
+```
+forza_wheel_leds.py
+  │
+  ├── ctypes.CDLL("LogitechSteeringWheelEnginesWrapper.dll")
+  │       │
+  │       ├── LogiSteeringInitialize()   — connects to G HUB service
+  │       ├── LogiIsConnected(0)         — checks wheel presence
+  │       └── LogiSetSteeringWheelRpmLeds(index, current, min, max)
+  │               └── G HUB driver → USB HID command → G920 LEDs
+  │
+  └── socket.recvfrom(2048)             — UDP listener (blocking, 1 s timeout)
+```
+
+The DLL communicates with the **Logitech G HUB** background service over a local pipe. G HUB then sends the LED state to the wheel over USB HID. This is why G HUB must be running — the DLL itself has no direct USB access.
