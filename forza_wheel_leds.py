@@ -181,12 +181,14 @@ IDX_ENGINE_IDLE_RPM = 3
 IDX_CURRENT_RPM     = 4
 IDX_GEAR            = 81
 
-SIZE_FH5_FH6 = 323
-SIZE_FM2023  = 331
+SIZE_FH5_FH6  = 323
+SIZE_FH5_FH6B = 324   # FH5 variant (+1 byte at end, same structure)
+SIZE_FM2023   = 331
 
 GAME_LABELS = {
-    SIZE_FH5_FH6: "FH5 / FH6",
-    SIZE_FM2023:  "FM2023",
+    SIZE_FH5_FH6:  "FH5 / FH6",
+    SIZE_FH5_FH6B: "FH5 / FH6",
+    SIZE_FM2023:   "FM2023",
 }
 
 
@@ -196,7 +198,7 @@ def patch_and_parse(data: bytes):
     Returns None if the packet size is not recognised.
     """
     size = len(data)
-    if size not in (SIZE_FH5_FH6, SIZE_FM2023):
+    if size not in (SIZE_FH5_FH6, SIZE_FH5_FH6B, SIZE_FM2023):
         return None
 
     patched = data[:232] + data[244:323]

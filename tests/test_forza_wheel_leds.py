@@ -77,7 +77,7 @@ class TestPatchAndParse(unittest.TestCase):
     def test_returns_none_for_unknown_size(self):
         self.assertIsNone(fwl.patch_and_parse(b"\x00" * 100))
         self.assertIsNone(fwl.patch_and_parse(b"\x00" * 322))
-        self.assertIsNone(fwl.patch_and_parse(b"\x00" * 324))
+        self.assertIsNone(fwl.patch_and_parse(b"\x00" * 325))
 
     def test_fh5_fh6_packet_parsed(self):
         pkt = _pack_packet(is_race_on=1, max_rpm=8000, idle_rpm=800,
@@ -90,6 +90,15 @@ class TestPatchAndParse(unittest.TestCase):
         self.assertAlmostEqual(result["current_rpm"], 6000.0, places=0)
         self.assertAlmostEqual(result["idle_rpm"], 800.0, places=0)
         self.assertEqual(result["gear"], 4)
+
+    def test_fh5_324_variant_parsed(self):
+        # FH5 variant with 324 bytes (1 extra byte at end) — same structure
+        pkt = _pack_packet(is_race_on=1, max_rpm=7500, current_rpm=4000,
+                           gear=3, raw_size=323) + b"\x00"
+        result = fwl.patch_and_parse(pkt)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["game"], "FH5 / FH6")
+        self.assertAlmostEqual(result["max_rpm"], 7500.0, places=0)
 
     def test_fm2023_packet_parsed(self):
         pkt = _pack_packet(is_race_on=1, max_rpm=9000, idle_rpm=900,
