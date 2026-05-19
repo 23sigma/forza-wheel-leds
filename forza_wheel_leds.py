@@ -171,6 +171,56 @@ def patch_and_parse(data: bytes):
 
 
 # ---------------------------------------------------------------------------
+# LED STATE LOGIC  (pure — no side effects, fully testable)
+# ---------------------------------------------------------------------------
+
+# LED actions returned by compute_led_state()
+LED_OFF     = "off"        # all LEDs off (menu / no race)
+LED_NORMAL  = "normal"     # progressive LEDs (normal RPM range)
+LED_BLINK_ON  = "blink_on"  # all LEDs on  (rev-limiter blink phase)
+LED_BLINK_OFF = "blink_off" # all LEDs off (rev-limiter blink phase)
+
+
+def compute_led_state(
+    current_rpm: float,
+    max_rpm: float,
+    blink_phase: bool,
+    last_blink: float,
+    now: float,
+    blink_thresh: float,
+    blink_interval: float,
+) -> tuple:
+    """
+    Pure function: given the current telemetry and blink state, return
+    (action, new_blink_phase, new_last_blink).
+
+    Parameters
+    ----------
+    current_rpm    : current engine RPM
+    max_rpm        : engine max (redline) RPM
+    blink_phase    : current blink phase (True = LEDs on)
+    last_blink     : timestamp of last blink toggle
+    now            : current timestamp
+    blink_thresh   : RPM threshold above which blinking starts
+    blink_interval : seconds between blink toggles (= 1 / BLINK_HZ)
+
+    Returns
+    -------
+    (action, new_blink_phase, new_last_blink)
+    """
+    if current_rpm >= blink_thresh:
+        if now - last_blink >= blink_interval:
+            blink_phase = not blink_phase
+            last_blink  = now
+        action = LED_BLINK_ON if blink_phase else LED_BLINK_OFF
+    else:
+        blink_phase = False
+        action      = LED_NORMAL
+
+    return action, blink_phase, last_blink
+
+
+# ---------------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------------
 
@@ -192,6 +242,21 @@ def leds_on(dll: ctypes.CDLL) -> None:
         ctypes.c_float(0.0),
         ctypes.c_float(1.0),
     )
+
+
+def apply_led_action(dll: ctypes.CDLL, action: str, current_rpm: float, min_rpm: float, max_rpm: float) -> None:
+    """Apply a LED action (returned by compute_led_state) to the wheel."""
+    if action == LED_OFF or action == LED_BLINK_OFF:
+        leds_off(dll)
+    elif action == LED_BLINK_ON:
+        leds_on(dll)
+    else:  # LED_NORMAL
+        dll.LogiSetSteeringWheelRpmLeds(
+            WHEEL_INDEX,
+            ctypes.c_float(current_rpm),
+            ctypes.c_float(min_rpm),
+            ctypes.c_float(max_rpm),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -227,9 +292,10 @@ def main() -> None:
     print("[INFO] In-game: Settings > HUD and Gameplay > Data Out : ON")
     print("[INFO] Press Ctrl+C to quit.\n")
 
-    last_game   = ""
-    blink_phase = False   # True = LEDs on, False = LEDs off during blink
-    last_blink  = 0.0     # timestamp of last blink toggle
+    last_game      = ""
+    blink_phase    = False
+    last_blink     = 0.0
+    blink_interval = 1.0 / BLINK_HZ
 
     try:
         while True:
@@ -248,35 +314,27 @@ def main() -> None:
                 last_game = packet["game"]
 
             if not packet["is_race_on"] or packet["max_rpm"] <= 0:
-                leds_off(dll)
+                apply_led_action(dll, LED_OFF, 0, 0, 0)
                 print("  Waiting for race …               ", end="\r")
                 continue
 
             min_rpm      = packet["max_rpm"] * LED_MIN_RPM_RATIO
             blink_thresh = packet["max_rpm"] * BLINK_RPM_RATIO
 
-            if packet["current_rpm"] >= blink_thresh:
-                # Rev-limiter zone: flash all LEDs at BLINK_HZ
-                now = time.time()
-                if now - last_blink >= 1.0 / BLINK_HZ:
-                    blink_phase = not blink_phase
-                    last_blink  = now
-                if blink_phase:
-                    leds_on(dll)
-                else:
-                    leds_off(dll)
-            else:
-                # Normal zone: progressive LEDs
-                blink_phase = False
-                dll.LogiSetSteeringWheelRpmLeds(
-                    WHEEL_INDEX,
-                    ctypes.c_float(packet["current_rpm"]),
-                    ctypes.c_float(min_rpm),
-                    ctypes.c_float(packet["max_rpm"]),
-                )
+            action, blink_phase, last_blink = compute_led_state(
+                current_rpm    = packet["current_rpm"],
+                max_rpm        = packet["max_rpm"],
+                blink_phase    = blink_phase,
+                last_blink     = last_blink,
+                now            = time.time(),
+                blink_thresh   = blink_thresh,
+                blink_interval = blink_interval,
+            )
 
-            blink_str = " *** REDLINE ***" if packet["current_rpm"] >= blink_thresh else ""
-            gear_str = "R" if packet["gear"] == 0 else str(packet["gear"])
+            apply_led_action(dll, action, packet["current_rpm"], min_rpm, packet["max_rpm"])
+
+            blink_str = " *** REDLINE ***" if action in (LED_BLINK_ON, LED_BLINK_OFF) else ""
+            gear_str  = "R" if packet["gear"] == 0 else str(packet["gear"])
             print(
                 f"  RPM {packet['current_rpm']:6.0f} / {packet['max_rpm']:.0f}"
                 f"  |  Gear {gear_str}"
@@ -287,11 +345,11 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n[INFO] Shutting down …")
     finally:
-        leds_off(dll)
+        apply_led_action(dll, LED_OFF, 0, 0, 0)
         dll.LogiSteeringShutdown()
         sock.close()
         print("[INFO] Done.")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()
