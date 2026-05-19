@@ -42,7 +42,8 @@ No Logitech G HUB required. No DLL. No driver.
 1. Download the latest `forza_wheel_leds_vX.X.X.zip` from [Releases](../../releases/latest) and extract it.
 2. Configure Forza (see [In-game setup](#in-game-setup)).
 3. Plug in your G29 or G920 via USB.
-4. Double-click `forza_wheel_leds.exe`.
+4. *(Optional)* Edit `config.ini` to customize port and LED thresholds.
+5. Double-click `forza_wheel_leds.exe`.
 
 No installation required. No G HUB. No drivers.
 
@@ -96,7 +97,31 @@ Data Out IP Port     : 5607
 - Plug in the wheel before launching the tool, or restart the tool after plugging in.
 
 **Wrong port**
-- Make sure the port in Forza's settings matches `UDP_PORT` in the script (default: `5607`).
+- Make sure the port in Forza's settings matches `udp_port` in `config.ini` (default: `5607`).
+
+---
+
+## Configuration
+
+A `config.ini` file is included in the release archive next to the `.exe`.  
+Edit it with any text editor — **no recompile needed**.
+
+```ini
+[settings]
+; UDP port — must match "Data Out IP Port" in-game (default: 5607)
+udp_port = 5607
+
+; Fraction of max RPM at which the FIRST LED lights up (0.0 – 1.0)
+led_min_rpm_ratio = 0.50
+
+; Rev-limiter blink: all LEDs flash above this fraction of max RPM (0.0 – 1.0)
+blink_rpm_ratio = 0.97
+
+; Blink frequency in Hz
+blink_hz = 10
+```
+
+If `config.ini` is absent or a key is missing, the default value is used.
 
 ---
 

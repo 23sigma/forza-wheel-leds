@@ -17,6 +17,7 @@ In-game setup (all supported Forza titles):
     Data Out IP Port     : 5607
 """
 
+import configparser
 import ctypes
 import ctypes.util
 import os
@@ -26,22 +27,54 @@ import sys
 import time
 
 # ---------------------------------------------------------------------------
-# USER CONFIGURATION
+# DEFAULT CONFIGURATION  (overridden by config.ini if present)
 # ---------------------------------------------------------------------------
 
-UDP_PORT = 5607       # Must match the port set in-game
-UDP_IP   = "0.0.0.0" # Listen on all interfaces (127.0.0.1 also works)
+UDP_PORT          = 5607   # Must match the port set in-game
+UDP_IP            = "0.0.0.0"
+LED_MIN_RPM_RATIO = 0.50   # First LED lights at this fraction of redline
+BLINK_RPM_RATIO   = 0.97   # All LEDs blink above this fraction of redline
+BLINK_HZ          = 10.0   # Blink frequency in Hz
 
-# Fraction of max RPM at which the FIRST LED lights up.
-#   0.50 → first LED at 50 % of redline  (recommended — all 5 LEDs visible)
-#   0.70 → first LED at 70 % of redline  (shift-indicator feel)
-LED_MIN_RPM_RATIO = 0.50
+CONFIG_FILENAME = "config.ini"
 
-# Rev-limiter blink: LEDs flash when RPM exceeds this fraction of max RPM.
-BLINK_RPM_RATIO = 0.97
 
-# Blink frequency in Hz (on/off cycles per second).
-BLINK_HZ = 10.0
+def _config_path() -> str:
+    """Return the path to config.ini, next to the .exe or the script."""
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, CONFIG_FILENAME)
+
+
+def load_config(path: str) -> dict:
+    """
+    Read config.ini and return a dict of validated settings.
+    Missing keys fall back to the module-level defaults.
+    """
+    cfg = configparser.ConfigParser()
+    cfg.read(path)
+    s = cfg["settings"] if "settings" in cfg else {}
+
+    def _float(key, default):
+        try:
+            return float(s.get(key, default))
+        except ValueError:
+            return float(default)
+
+    def _int(key, default):
+        try:
+            return int(s.get(key, default))
+        except ValueError:
+            return int(default)
+
+    return {
+        "udp_port":          _int  ("udp_port",          UDP_PORT),
+        "led_min_rpm_ratio": _float("led_min_rpm_ratio", LED_MIN_RPM_RATIO),
+        "blink_rpm_ratio":   _float("blink_rpm_ratio",   BLINK_RPM_RATIO),
+        "blink_hz":          _float("blink_hz",          BLINK_HZ),
+    }
 
 # ---------------------------------------------------------------------------
 # LOGITECH G29 / G920  —  DIRECT USB HID via hidapi.dll (ctypes)
@@ -270,13 +303,26 @@ def apply_led_action(lib: ctypes.CDLL, handle, action: str,
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # --- Load config ---
+    cfg_path = _config_path()
+    cfg = load_config(cfg_path)
+
+    udp_port          = cfg["udp_port"]
+    led_min_rpm_ratio = cfg["led_min_rpm_ratio"]
+    blink_rpm_ratio   = cfg["blink_rpm_ratio"]
+    blink_hz          = cfg["blink_hz"]
+    blink_interval    = 1.0 / blink_hz
+
+    cfg_source = "config.ini" if os.path.exists(cfg_path) else "defaults"
+
     print("=" * 58)
     print("  forza-wheel-leds  |  Logitech G29 / G920 RPM LEDs")
     print("=" * 58)
-    print(f"  Version        : 1.2.3")
-    print(f"  Listening on   : {UDP_IP}:{UDP_PORT}")
-    print(f"  LED min RPM    : {int(LED_MIN_RPM_RATIO * 100)} % of redline")
-    print(f"  Blink at       : {int(BLINK_RPM_RATIO * 100)} % of redline  ({BLINK_HZ:.0f} Hz)")
+    print(f"  Version        : 1.3.0")
+    print(f"  Config         : {cfg_source}")
+    print(f"  Listening on   : {UDP_IP}:{udp_port}")
+    print(f"  LED min RPM    : {int(led_min_rpm_ratio * 100)} % of redline")
+    print(f"  Blink at       : {int(blink_rpm_ratio * 100)} % of redline  ({blink_hz:.0f} Hz)")
     print("=" * 58)
     print()
 
@@ -306,24 +352,23 @@ def main() -> None:
 
     # --- UDP socket ---
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((UDP_IP, UDP_PORT))
+    sock.bind((UDP_IP, udp_port))
     sock.settimeout(1.0)
 
-    print(f"[OK]   UDP socket bound to {UDP_IP}:{UDP_PORT}")
+    print(f"[OK]   UDP socket bound to {UDP_IP}:{udp_port}")
     print()
     print("  In-game setup (do once per Forza title):")
     print("    Settings > HUD and Gameplay > Data Out : ON")
     print(f"    Data Out IP Address : 127.0.0.1")
-    print(f"    Data Out IP Port    : {UDP_PORT}")
+    print(f"    Data Out IP Port    : {udp_port}")
     print()
     print("  Waiting for Forza telemetry …")
     print("  Close this window (or press Ctrl+C) to stop.")
     print()
 
-    last_game      = ""
-    blink_phase    = False
-    last_blink     = 0.0
-    blink_interval = 1.0 / BLINK_HZ
+    last_game   = ""
+    blink_phase = False
+    last_blink  = 0.0
 
     try:
         while True:
@@ -358,8 +403,8 @@ def main() -> None:
                 print("  In menu — LEDs off …                   ", end="\r")
                 continue
 
-            min_rpm      = packet["max_rpm"] * LED_MIN_RPM_RATIO
-            blink_thresh = packet["max_rpm"] * BLINK_RPM_RATIO
+            min_rpm      = packet["max_rpm"] * led_min_rpm_ratio
+            blink_thresh = packet["max_rpm"] * blink_rpm_ratio
 
             action, blink_phase, last_blink = compute_led_state(
                 current_rpm    = packet["current_rpm"],

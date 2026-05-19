@@ -5,10 +5,12 @@ All tests run without a real HID device, UDP socket, or running game.
 hidapi.dll is mocked via ctypes.CDLL.
 """
 
+import configparser
 import os
 import socket
 import struct
 import sys
+import tempfile
 import unittest
 from unittest.mock import MagicMock, call, patch
 
@@ -180,6 +182,83 @@ class TestHidapiDllPath(unittest.TestCase):
              patch("os.path.exists", return_value=False):
             path = fwl._hidapi_dll_path()
         self.assertEqual(path, "hidapi.dll")
+
+
+# ---------------------------------------------------------------------------
+# Tests: _config_path
+# ---------------------------------------------------------------------------
+
+class TestConfigPath(unittest.TestCase):
+
+    def test_frozen_returns_beside_executable(self):
+        with patch.object(sys, "frozen", True, create=True), \
+             patch.object(sys, "executable", "/fake/app.exe", create=True):
+            path = fwl._config_path()
+        self.assertEqual(path, os.path.join("/fake", "config.ini"))
+
+    def test_script_returns_beside_script(self):
+        with patch.object(sys, "frozen", False, create=True):
+            path = fwl._config_path()
+        self.assertTrue(path.endswith("config.ini"))
+
+
+# ---------------------------------------------------------------------------
+# Tests: load_config
+# ---------------------------------------------------------------------------
+
+class TestLoadConfig(unittest.TestCase):
+
+    def _write_ini(self, content: str) -> str:
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".ini",
+                                        delete=False)
+        f.write(content)
+        f.close()
+        return f.name
+
+    def test_defaults_when_file_absent(self):
+        cfg = fwl.load_config("/nonexistent/config.ini")
+        self.assertEqual(cfg["udp_port"],          fwl.UDP_PORT)
+        self.assertAlmostEqual(cfg["led_min_rpm_ratio"], fwl.LED_MIN_RPM_RATIO)
+        self.assertAlmostEqual(cfg["blink_rpm_ratio"],   fwl.BLINK_RPM_RATIO)
+        self.assertAlmostEqual(cfg["blink_hz"],          fwl.BLINK_HZ)
+
+    def test_reads_all_keys(self):
+        ini = self._write_ini(
+            "[settings]\n"
+            "udp_port=1234\n"
+            "led_min_rpm_ratio=0.65\n"
+            "blink_rpm_ratio=0.95\n"
+            "blink_hz=8\n"
+        )
+        try:
+            cfg = fwl.load_config(ini)
+        finally:
+            os.unlink(ini)
+        self.assertEqual(cfg["udp_port"], 1234)
+        self.assertAlmostEqual(cfg["led_min_rpm_ratio"], 0.65)
+        self.assertAlmostEqual(cfg["blink_rpm_ratio"],   0.95)
+        self.assertAlmostEqual(cfg["blink_hz"],          8.0)
+
+    def test_invalid_values_fall_back_to_defaults(self):
+        ini = self._write_ini(
+            "[settings]\n"
+            "udp_port=notanumber\n"
+            "blink_hz=bad\n"
+        )
+        try:
+            cfg = fwl.load_config(ini)
+        finally:
+            os.unlink(ini)
+        self.assertEqual(cfg["udp_port"], fwl.UDP_PORT)
+        self.assertAlmostEqual(cfg["blink_hz"], fwl.BLINK_HZ)
+
+    def test_missing_section_uses_defaults(self):
+        ini = self._write_ini("[other]\nfoo=bar\n")
+        try:
+            cfg = fwl.load_config(ini)
+        finally:
+            os.unlink(ini)
+        self.assertEqual(cfg["udp_port"], fwl.UDP_PORT)
 
 
 # ---------------------------------------------------------------------------
@@ -370,10 +449,36 @@ class TestMain(unittest.TestCase):
         with load_patch, \
              patch("socket.socket", return_value=mock_sock), \
              patch("time.time", return_value=100.0), \
+             patch.object(fwl, "_config_path", return_value="/fake/config.ini"), \
+             patch("os.path.exists", return_value=False), \
              patch("builtins.input"):
             fwl.main()
 
         return lib
+
+    def test_main_config_file_present_label(self):
+        """Cover the cfg_source = 'config.ini' branch (os.path.exists returns True)."""
+        pkt = _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=5000,
+                           raw_size=323)
+        lib = self._make_lib(wheel_found=True)
+        mock_sock = MagicMock()
+        recv_iter = iter([pkt])
+
+        def fake_recvfrom(_):
+            try:
+                return next(recv_iter), ("127.0.0.1", 5607)
+            except StopIteration:
+                raise KeyboardInterrupt
+
+        mock_sock.recvfrom.side_effect = fake_recvfrom
+
+        with patch.object(fwl, "load_hidapi", return_value=lib), \
+             patch("socket.socket", return_value=mock_sock), \
+             patch("time.time", return_value=100.0), \
+             patch.object(fwl, "_config_path", return_value="/fake/config.ini"), \
+             patch("os.path.exists", return_value=True), \
+             patch("builtins.input"):
+            fwl.main()
 
     def test_main_dll_not_found_exits(self):
         with self.assertRaises(SystemExit):
@@ -461,6 +566,8 @@ class TestMain(unittest.TestCase):
         with patch.object(fwl, "load_hidapi", return_value=lib), \
              patch("socket.socket", return_value=mock_sock), \
              patch("time.time", return_value=100.0), \
+             patch.object(fwl, "_config_path", return_value="/fake/config.ini"), \
+             patch("os.path.exists", return_value=False), \
              patch("builtins.input"):
             fwl.main()
 
@@ -481,6 +588,8 @@ class TestMain(unittest.TestCase):
         with patch.object(fwl, "load_hidapi", return_value=lib), \
              patch("socket.socket", return_value=mock_sock), \
              patch("time.time", return_value=100.0), \
+             patch.object(fwl, "_config_path", return_value="/fake/config.ini"), \
+             patch("os.path.exists", return_value=False), \
              patch("builtins.input"):
             fwl.main()  # must not raise
 
