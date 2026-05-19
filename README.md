@@ -29,8 +29,9 @@ This tool reads `CurrentEngineRpm` and `EngineMaxRpm` from each packet and calls
 |---|---|
 | Windows 10 / 11 | Linux/macOS not supported (Logitech SDK is Windows-only) |
 | Logitech G HUB | Must be installed **and running** in the background |
-| `LogitechSteeringWheelEnginesWrapper.dll` | From the [Logitech Steering Wheel SDK](#logitech-sdk) — place it next to the script / .exe |
 | Python 3.8+ | Only needed if running the `.py` script — not needed for the `.exe` release |
+
+> The Logitech DLL is included in this repo (`dll/x64/` and `dll/x86/`) and bundled automatically in every release zip.
 
 ---
 
@@ -38,10 +39,11 @@ This tool reads `CurrentEngineRpm` and `EngineMaxRpm` from each packet and calls
 
 ### Option A — Pre-built .exe (no Python needed)
 
-1. Download the latest `forza_wheel_leds.exe` from [Releases](../../releases/latest).
-2. Place `LogitechSteeringWheelEnginesWrapper.dll` **in the same folder** as the `.exe` (see [Logitech SDK](#logitech-sdk) below).
-3. Configure Forza (see [In-game setup](#in-game-setup)).
-4. Double-click `forza_wheel_leds.exe`, then launch a race.
+1. Download the latest `forza_wheel_leds_vX.X.X.zip` from [Releases](../../releases/latest) and extract it.
+2. Configure Forza (see [In-game setup](#in-game-setup)).
+3. Double-click `forza_wheel_leds.exe`.
+
+> The Logitech DLL (`LogitechSteeringWheelEnginesWrapper.dll`) is included in the zip — nothing else to download.
 
 ### Option B — Python script
 
@@ -50,7 +52,7 @@ This tool reads `CurrentEngineRpm` and `EngineMaxRpm` from each packet and calls
 python forza_wheel_leds.py
 ```
 
-Place `LogitechSteeringWheelEnginesWrapper.dll` in the same folder as the script.
+Place `dll/x64/LogitechSteeringWheelEnginesWrapper.dll` (or `dll/x86/` for 32-bit Python) in the same folder as the script.
 
 ---
 
@@ -74,69 +76,14 @@ Data Out IP Port     : 5607
 
 ---
 
-## Logitech SDK
-
-The Logitech Steering Wheel SDK is **not bundled** in this repo (Logitech licence).  
-Download it directly from Logitech:
-
-**[LogitechSteeringWheelSDK_8.75.30.zip](https://www.logitechg.com/sdk/LogitechSteeringWheelSDK_8.75.30.zip)**
-
-Inside the archive, copy the correct DLL for your Python/system architecture:
-
-| Architecture | DLL file |
-|---|---|
-| 64-bit (most users) | `LogitechSteeringWheelEnginesWrapper.dll` |
-| 32-bit | `LogitechSteeringWheelEnginesWrapper_x86.dll` → rename to `LogitechSteeringWheelEnginesWrapper.dll` |
-
----
-
-## Configuration
-
-Open `forza_wheel_leds.py` and edit the constants at the top:
-
-```python
-UDP_PORT          = 5607   # Must match the port set in Forza
-LED_MIN_RPM_RATIO = 0.70   # First LED lights at 70 % of redline
-WHEEL_INDEX       = 0      # 0 = first connected Logitech wheel
-```
-
-| Setting | Description |
-|---|---|
-| `UDP_PORT` | UDP port — must match the value set in Forza's Data Out settings |
-| `LED_MIN_RPM_RATIO` | `0.70` = shift-indicator feel (LEDs start late). `0.50` = wider spread |
-| `WHEEL_INDEX` | Index of your wheel (0 for single wheel setups) |
-
----
-
-## Supported games & wheels
-
-**Games**
-- Forza Horizon 5
-- Forza Horizon 6
-- Forza Motorsport (2023)
-
-**Wheels** (any Logitech wheel supported by the Steering Wheel SDK)
-
-| Wheel | LEDs | Layout |
-|---|---|---|
-| Logitech G29 | 11 | Arc: 🟢🟢🟡🟡🔴🔴🔴🟡🟡🟢🟢 |
-| Logitech G920 | 5 | Row: 🟢🟢🟡🔴🔴 |
-| Logitech G923 | 5 | Row: 🟢🟢🟡🔴🔴 |
-| Logitech G27 | 5 | Row: 🟢🟢🟡🔴🔴 |
-
-The Logitech SDK automatically maps the `[min_rpm … max_rpm]` range to however many LEDs the connected wheel has — no configuration needed.
-
----
-
 ## Troubleshooting
 
 **LEDs don't light up**
 - Is Logitech G HUB installed and running in the system tray?
-- Is `LogitechSteeringWheelEnginesWrapper.dll` next to the script / .exe?
 - Did you set Data Out to ON in Forza and use port `5607`?
 
 **`[ERROR] Could not load DLL`**
-- The DLL is missing or in the wrong folder. See [Logitech SDK](#logitech-sdk).
+- The DLL is missing from the folder. For the `.exe`: re-download the release zip (DLL is included). For the script: copy `dll/x64/LogitechSteeringWheelEnginesWrapper.dll` next to `forza_wheel_leds.py`.
 
 **`[WARN] No Logitech wheel detected`**
 - Plug in the wheel before launching the tool, or launch the tool after G HUB has detected the wheel.

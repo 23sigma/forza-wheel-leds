@@ -69,8 +69,8 @@ jobs:
           Copy-Item dist\forza_wheel_leds.exe $dir\
           Copy-Item README.md $dir\
           Copy-Item LICENSE $dir\
-          $txt = "Place LogitechSteeringWheelEnginesWrapper.dll here (next to forza_wheel_leds.exe).`n`nDownload the Logitech Steering Wheel SDK:`nhttps://www.logitechg.com/sdk/LogitechSteeringWheelSDK_8.75.30.zip"
-          $txt | Out-File -FilePath "$dir\PUT_LOGITECH_DLL_HERE.txt" -Encoding utf8
+          # Bundle the 64-bit DLL directly — no separate download needed
+          Copy-Item dll\x64\LogitechSteeringWheelEnginesWrapper.dll $dir\
           Compress-Archive -Path $dir -DestinationPath "forza_wheel_leds_$tag.zip"
 
       - name: Create GitHub Release
@@ -82,14 +82,12 @@ jobs:
 
             ### Installation
             1. Download `forza_wheel_leds_${{ github.ref_name }}.zip` and extract it.
-            2. Copy `LogitechSteeringWheelEnginesWrapper.dll` from the [Logitech Steering Wheel SDK](https://www.logitechg.com/sdk/LogitechSteeringWheelSDK_8.75.30.zip) into the extracted folder.
-            3. Configure Forza Data Out (see README).
-            4. Run `forza_wheel_leds.exe`.
+            2. Configure Forza Data Out (see README).
+            3. Run `forza_wheel_leds.exe` — that's it.
 
             ### Requirements
             - Windows 10 / 11
             - Logitech G HUB installed and running
-            - Logitech Steering Wheel SDK DLL (see above)
           files: "forza_wheel_leds_${{ github.ref_name }}.zip"
           draft: false
           prerelease: false
