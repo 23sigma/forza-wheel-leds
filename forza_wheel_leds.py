@@ -36,6 +36,14 @@ UDP_IP   = "0.0.0.0" # Listen on all interfaces (127.0.0.1 also works)
 #   0.50 → first LED at 50 %             (wider spread, always visible)
 LED_MIN_RPM_RATIO = 0.70
 
+# Rev-limiter blink: LEDs flash when RPM exceeds this fraction of max RPM.
+#   0.97 → blink starts at 97 % of redline (recommended)
+#   1.00 → disable blinking
+BLINK_RPM_RATIO = 0.97
+
+# Blink frequency in Hz (on/off cycles per second).
+BLINK_HZ = 10.0
+
 WHEEL_INDEX = 0       # 0 = first connected Logitech wheel
 
 # ---------------------------------------------------------------------------
@@ -176,6 +184,16 @@ def leds_off(dll: ctypes.CDLL) -> None:
     )
 
 
+def leds_on(dll: ctypes.CDLL) -> None:
+    """Turn all RPM LEDs fully on."""
+    dll.LogiSetSteeringWheelRpmLeds(
+        WHEEL_INDEX,
+        ctypes.c_float(1.0),
+        ctypes.c_float(0.0),
+        ctypes.c_float(1.0),
+    )
+
+
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
@@ -209,7 +227,9 @@ def main() -> None:
     print("[INFO] In-game: Settings > HUD and Gameplay > Data Out : ON")
     print("[INFO] Press Ctrl+C to quit.\n")
 
-    last_game = ""
+    last_game   = ""
+    blink_phase = False   # True = LEDs on, False = LEDs off during blink
+    last_blink  = 0.0     # timestamp of last blink toggle
 
     try:
         while True:
@@ -232,20 +252,35 @@ def main() -> None:
                 print("  Waiting for race …               ", end="\r")
                 continue
 
-            min_rpm = packet["max_rpm"] * LED_MIN_RPM_RATIO
+            min_rpm      = packet["max_rpm"] * LED_MIN_RPM_RATIO
+            blink_thresh = packet["max_rpm"] * BLINK_RPM_RATIO
 
-            dll.LogiSetSteeringWheelRpmLeds(
-                WHEEL_INDEX,
-                ctypes.c_float(packet["current_rpm"]),
-                ctypes.c_float(min_rpm),
-                ctypes.c_float(packet["max_rpm"]),
-            )
+            if packet["current_rpm"] >= blink_thresh:
+                # Rev-limiter zone: flash all LEDs at BLINK_HZ
+                now = time.time()
+                if now - last_blink >= 1.0 / BLINK_HZ:
+                    blink_phase = not blink_phase
+                    last_blink  = now
+                if blink_phase:
+                    leds_on(dll)
+                else:
+                    leds_off(dll)
+            else:
+                # Normal zone: progressive LEDs
+                blink_phase = False
+                dll.LogiSetSteeringWheelRpmLeds(
+                    WHEEL_INDEX,
+                    ctypes.c_float(packet["current_rpm"]),
+                    ctypes.c_float(min_rpm),
+                    ctypes.c_float(packet["max_rpm"]),
+                )
 
+            blink_str = " *** REDLINE ***" if packet["current_rpm"] >= blink_thresh else ""
             gear_str = "R" if packet["gear"] == 0 else str(packet["gear"])
             print(
                 f"  RPM {packet['current_rpm']:6.0f} / {packet['max_rpm']:.0f}"
                 f"  |  Gear {gear_str}"
-                f"  |  {packet['game']}   ",
+                f"  |  {packet['game']}{blink_str}   ",
                 end="\r",
             )
 
