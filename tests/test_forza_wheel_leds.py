@@ -244,37 +244,37 @@ class TestApplyLedAction(unittest.TestCase):
 
     def _mock_dll(self):
         dll = MagicMock()
-        dll.LogiSetSteeringWheelRpmLeds = MagicMock()
+        dll.LogiPlayLeds = MagicMock()
         return dll
 
     def test_led_off_calls_leds_off(self):
         dll = self._mock_dll()
         fwl.apply_led_action(dll, fwl.LED_OFF, 0, 0, 0)
-        dll.LogiSetSteeringWheelRpmLeds.assert_called_once()
-        args = dll.LogiSetSteeringWheelRpmLeds.call_args[0]
+        dll.LogiPlayLeds.assert_called_once()
+        args = dll.LogiPlayLeds.call_args[0]
         # currentRPM arg should be 0.0
         self.assertAlmostEqual(float(args[1].value), 0.0)
 
     def test_led_blink_off_calls_leds_off(self):
         dll = self._mock_dll()
         fwl.apply_led_action(dll, fwl.LED_BLINK_OFF, 0, 0, 0)
-        dll.LogiSetSteeringWheelRpmLeds.assert_called_once()
-        args = dll.LogiSetSteeringWheelRpmLeds.call_args[0]
+        dll.LogiPlayLeds.assert_called_once()
+        args = dll.LogiPlayLeds.call_args[0]
         self.assertAlmostEqual(float(args[1].value), 0.0)
 
     def test_led_blink_on_calls_leds_on(self):
         dll = self._mock_dll()
         fwl.apply_led_action(dll, fwl.LED_BLINK_ON, 0, 0, 0)
-        dll.LogiSetSteeringWheelRpmLeds.assert_called_once()
-        args = dll.LogiSetSteeringWheelRpmLeds.call_args[0]
+        dll.LogiPlayLeds.assert_called_once()
+        args = dll.LogiPlayLeds.call_args[0]
         # currentRPM arg should be 1.0 (all on)
         self.assertAlmostEqual(float(args[1].value), 1.0)
 
     def test_led_normal_passes_rpm_values(self):
         dll = self._mock_dll()
         fwl.apply_led_action(dll, fwl.LED_NORMAL, 6000.0, 5600.0, 8000.0)
-        dll.LogiSetSteeringWheelRpmLeds.assert_called_once()
-        args = dll.LogiSetSteeringWheelRpmLeds.call_args[0]
+        dll.LogiPlayLeds.assert_called_once()
+        args = dll.LogiPlayLeds.call_args[0]
         self.assertAlmostEqual(float(args[1].value), 6000.0)
         self.assertAlmostEqual(float(args[2].value), 5600.0)
         self.assertAlmostEqual(float(args[3].value), 8000.0)
@@ -288,21 +288,21 @@ class TestLedsHelpers(unittest.TestCase):
 
     def _mock_dll(self):
         dll = MagicMock()
-        dll.LogiSetSteeringWheelRpmLeds = MagicMock()
+        dll.LogiPlayLeds = MagicMock()
         return dll
 
     def test_leds_off(self):
         dll = self._mock_dll()
         fwl.leds_off(dll)
-        dll.LogiSetSteeringWheelRpmLeds.assert_called_once()
-        args = dll.LogiSetSteeringWheelRpmLeds.call_args[0]
+        dll.LogiPlayLeds.assert_called_once()
+        args = dll.LogiPlayLeds.call_args[0]
         self.assertAlmostEqual(float(args[1].value), 0.0)  # currentRPM = 0
 
     def test_leds_on(self):
         dll = self._mock_dll()
         fwl.leds_on(dll)
-        dll.LogiSetSteeringWheelRpmLeds.assert_called_once()
-        args = dll.LogiSetSteeringWheelRpmLeds.call_args[0]
+        dll.LogiPlayLeds.assert_called_once()
+        args = dll.LogiPlayLeds.call_args[0]
         self.assertAlmostEqual(float(args[1].value), 1.0)  # currentRPM = 1
 
 
@@ -395,7 +395,7 @@ class TestMain(unittest.TestCase):
         mock_dll = MagicMock()
         mock_dll.LogiSteeringInitialize.return_value = True
         mock_dll.LogiIsConnected.return_value = True
-        mock_dll.LogiSetSteeringWheelRpmLeds.side_effect = Exception("dll error")
+        mock_dll.LogiPlayLeds.side_effect = Exception("dll error")
         mock_dll.LogiSteeringShutdown.side_effect = Exception("shutdown error")
 
         mock_sock = MagicMock()

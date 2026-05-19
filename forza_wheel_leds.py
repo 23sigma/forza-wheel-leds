@@ -90,8 +90,8 @@ def load_logitech_sdk() -> ctypes.CDLL:
     dll.LogiIsConnected.restype  = ctypes.c_bool
     dll.LogiIsConnected.argtypes = [ctypes.c_int]
 
-    dll.LogiSetSteeringWheelRpmLeds.restype  = ctypes.c_bool
-    dll.LogiSetSteeringWheelRpmLeds.argtypes = [
+    dll.LogiPlayLeds.restype  = ctypes.c_bool
+    dll.LogiPlayLeds.argtypes = [
         ctypes.c_int,    # index
         ctypes.c_float,  # currentRPM
         ctypes.c_float,  # minRPM
@@ -244,7 +244,7 @@ def compute_led_state(
 
 def leds_off(dll: ctypes.CDLL) -> None:
     """Turn all RPM LEDs off."""
-    dll.LogiSetSteeringWheelRpmLeds(
+    dll.LogiPlayLeds(
         WHEEL_INDEX,
         ctypes.c_float(0.0),
         ctypes.c_float(1.0),
@@ -254,7 +254,7 @@ def leds_off(dll: ctypes.CDLL) -> None:
 
 def leds_on(dll: ctypes.CDLL) -> None:
     """Turn all RPM LEDs fully on."""
-    dll.LogiSetSteeringWheelRpmLeds(
+    dll.LogiPlayLeds(
         WHEEL_INDEX,
         ctypes.c_float(1.0),
         ctypes.c_float(0.0),
@@ -269,7 +269,7 @@ def apply_led_action(dll: ctypes.CDLL, action: str, current_rpm: float, min_rpm:
     elif action == LED_BLINK_ON:
         leds_on(dll)
     else:  # LED_NORMAL
-        dll.LogiSetSteeringWheelRpmLeds(
+        dll.LogiPlayLeds(
             WHEEL_INDEX,
             ctypes.c_float(current_rpm),
             ctypes.c_float(min_rpm),
