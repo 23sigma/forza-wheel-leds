@@ -44,12 +44,16 @@ No Logitech G HUB required. No DLL. No driver.
 3. Plug in your G29 or G920 via USB.
 4. Double-click `forza_wheel_leds.exe`.
 
+No installation required. No G HUB. No drivers.
+
 ### Option B — Python script
 
 ```bash
 pip install hid
 python forza_wheel_leds.py
 ```
+
+> On Windows, `hid` also requires `hidapi.dll`. Download it from the [hidapi releases](https://github.com/libusb/hidapi/releases/latest) (extract `x64\hidapi.dll` and place it next to the script), or just use the `.exe` release which bundles everything.
 
 ---
 

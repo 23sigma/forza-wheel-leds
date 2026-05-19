@@ -17,6 +17,7 @@ In-game setup (all supported Forza titles):
     Data Out IP Port     : 5607
 """
 
+import os
 import socket
 import struct
 import sys
@@ -283,6 +284,13 @@ def main() -> None:
     print()
 
     # --- HID wheel ---
+    # When running as a PyInstaller .exe, hidapi.dll is extracted to sys._MEIPASS.
+    # We must add that directory to PATH before importing hid, otherwise the
+    # ctypes-based hid package cannot find the DLL at import time.
+    if getattr(sys, "frozen", False):
+        meipass = sys._MEIPASS  # type: ignore[attr-defined]
+        os.environ["PATH"] = meipass + os.pathsep + os.environ.get("PATH", "")
+
     try:
         import hid as hid_module
     except ImportError:

@@ -66,17 +66,7 @@ jobs:
           Copy-Item hidapi-win\x64\hidapi.dll .
 
       - name: Build .exe
-        run: pyinstaller --onefile --console --name forza_wheel_leds --collect-all hid --add-binary "hidapi.dll;." forza_wheel_leds.py
-
-      - name: Debug - show PyInstaller output
-        shell: pwsh
-        run: |
-          Write-Host "=== dist contents ==="
-          Get-ChildItem dist\ -Recurse
-          Write-Host "=== pip show hidapi ==="
-          pip show hid
-          Write-Host "=== hid package location ==="
-          python -c "import hid; print(hid.__file__); print(dir(hid))"
+        run: pyinstaller --onefile --console --name forza_wheel_leds --hidden-import hid --add-binary "hidapi.dll;." forza_wheel_leds.py
 
       - name: Create release archive
         shell: pwsh
