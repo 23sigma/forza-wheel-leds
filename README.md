@@ -115,7 +115,7 @@ udp_port = 5607
 led_min_rpm_ratio = 0.65
 
 ; Rev-limiter blink: all LEDs flash above this fraction of max RPM (0.0 – 1.0)
-blink_rpm_ratio = 0.87
+blink_rpm_ratio = 0.90
 
 ; Blink frequency in Hz
 blink_hz = 10
@@ -197,7 +197,7 @@ min_rpm ────────────────────────
   ○ ○ ○ ○ ○  →  ● ○ ○ ○ ○  →  ● ● ● ● ●
 ```
 
-When `currentRPM ≥ 87 % of max_rpm` (rev-limiter zone), all LEDs flash on/off at 10 Hz.
+When `currentRPM ≥ 90 % of max_rpm` (rev-limiter zone), all LEDs flash on/off at 10 Hz.
 
 ### 5. USB HID command
 
