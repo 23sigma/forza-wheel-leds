@@ -116,10 +116,15 @@ WHEEL_INDEX       = 0      # 0 = first connected Logitech wheel
 - Forza Motorsport (2023)
 
 **Wheels** (any Logitech wheel supported by the Steering Wheel SDK)
-- Logitech G920
-- Logitech G29
-- Logitech G923
-- Logitech G27
+
+| Wheel | LEDs | Layout |
+|---|---|---|
+| Logitech G29 | 11 | Arc: 🟢🟢🟡🟡🔴🔴🔴🟡🟡🟢🟢 |
+| Logitech G920 | 5 | Row: 🟢🟢🟡🔴🔴 |
+| Logitech G923 | 5 | Row: 🟢🟢🟡🔴🔴 |
+| Logitech G27 | 5 | Row: 🟢🟢🟡🔴🔴 |
+
+The Logitech SDK automatically maps the `[min_rpm … max_rpm]` range to however many LEDs the connected wheel has — no configuration needed.
 
 ---
 
@@ -207,12 +212,17 @@ min_rpm = max_rpm * LED_MIN_RPM_RATIO   # e.g. 70 % of redline
 LogiSetSteeringWheelRpmLeds(index, currentRPM, min_rpm, max_rpm)
 ```
 
-The SDK maps `[min_rpm … max_rpm]` linearly across the 5 LEDs:
+The SDK maps `[min_rpm … max_rpm]` linearly across however many LEDs the wheel has:
 
 ```
-min_rpm ──────────────────────────────── max_rpm
-  ○ ○ ○ ○ ○   →   ● ○ ○ ○ ○   →   ● ● ● ● ●
-  (no LEDs)       (1st LED on)     (all 5 on)
+G920 / G27 (5 LEDs)
+min_rpm ──────────────────────────── max_rpm
+  ○ ○ ○ ○ ○  →  ● ○ ○ ○ ○  →  ● ● ● ● ●
+
+G29 (11 LEDs, green → yellow → red)
+min_rpm ──────────────────────────── max_rpm
+  ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○  →  ● ● ● ● ● ● ● ● ● ● ●
+  (all off)                   (all on: 🟢🟢🟡🟡🔴🔴🔴🟡🟡🟢🟢)
 ```
 
 When `currentRPM ≥ 97 % of max_rpm` (rev-limiter zone), the script **ignores the SDK's progressive mode** and flashes all LEDs on/off at 10 Hz instead:
