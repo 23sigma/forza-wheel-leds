@@ -330,8 +330,13 @@ def main() -> None:
 
             packet = patch_and_parse(data)
             if packet is None:
-                print(f"  [UDP] Packet received from {addr[0]}:{addr[1]} "
-                      f"— size {len(data)} bytes (unrecognised format)   ", end="\r")
+                # Log first packet in detail to help diagnose unknown format
+                hex_preview = data[:32].hex(" ")
+                print(f"\n[UDP] Unknown packet — size {len(data)} bytes")
+                print(f"      From  : {addr[0]}:{addr[1]}")
+                print(f"      Bytes : {hex_preview} …")
+                print(f"      (copy the above and send it for diagnosis)")
+                print()
                 continue
 
             if packet["game"] != last_game:
