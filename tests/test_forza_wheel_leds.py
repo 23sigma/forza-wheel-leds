@@ -390,6 +390,25 @@ class TestMain(unittest.TestCase):
 
         return mock_dll
 
+    def test_main_finally_handles_dll_and_sock_errors(self):
+        """Cover the except-pass branches in finally when dll/sock calls raise."""
+        mock_dll = MagicMock()
+        mock_dll.LogiSteeringInitialize.return_value = True
+        mock_dll.LogiIsConnected.return_value = True
+        mock_dll.LogiSetSteeringWheelRpmLeds.side_effect = Exception("dll error")
+        mock_dll.LogiSteeringShutdown.side_effect = Exception("shutdown error")
+
+        mock_sock = MagicMock()
+        mock_sock.recvfrom.side_effect = KeyboardInterrupt
+        mock_sock.close.side_effect = Exception("close error")
+
+        with patch("ctypes.CDLL", return_value=mock_dll), \
+             patch("socket.socket", return_value=mock_sock), \
+             patch("time.sleep"), \
+             patch("time.time", return_value=100.0), \
+             patch("builtins.input"):
+            fwl.main()  # should not raise despite all the side_effects
+
     def test_main_normal_race(self):
         pkt = _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=5000,
                            gear=3, raw_size=323)

@@ -381,13 +381,26 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n[INFO] Shutting down …")
     finally:
-        apply_led_action(dll, LED_OFF, 0, 0, 0)
-        dll.LogiSteeringShutdown()
-        sock.close()
+        try:
+            apply_led_action(dll, LED_OFF, 0, 0, 0)
+            dll.LogiSteeringShutdown()
+        except Exception:
+            pass
+        try:
+            sock.close()
+        except Exception:
+            pass
         print("[INFO] LEDs off. Socket closed.")
         print()
         input("  Press Enter to close this window …")
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    try:
+        main()
+    except Exception as exc:
+        print(f"\n[FATAL] Unexpected error: {exc}")
+        import traceback
+        traceback.print_exc()
+        print()
+        input("  Press Enter to close this window …")
