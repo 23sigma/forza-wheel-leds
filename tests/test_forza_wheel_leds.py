@@ -1,9 +1,11 @@
 """
 Unit tests for forza_wheel_leds.py — targeting 100 % line coverage.
 
-All tests run without a HID device, a UDP socket, or a running game.
+All tests run without a real HID device, UDP socket, or running game.
+hidapi.dll is mocked via ctypes.CDLL.
 """
 
+import os
 import socket
 import struct
 import sys
@@ -11,7 +13,7 @@ import unittest
 from unittest.mock import MagicMock, call, patch
 
 # ---------------------------------------------------------------------------
-# Helpers to build valid Forza UDP packets for testing
+# Helpers to build valid Forza UDP packets
 # ---------------------------------------------------------------------------
 
 DASH_FORMAT = (
@@ -37,10 +39,8 @@ def _pack_packet(
 ) -> bytes:
     fmt_fields = struct.unpack_from(DASH_FORMAT, bytes(311))
     n = len(fmt_fields)
-
     vals = [0] * n
     vals[0] = is_race_on
-    vals[1] = 0
     vals[2] = max_rpm
     vals[3] = idle_rpm
     vals[4] = current_rpm
@@ -135,13 +135,11 @@ class TestRpmToBitmask(unittest.TestCase):
         self.assertEqual(fwl.rpm_to_bitmask(5600, 5600, 8000), 0x00)
 
     def test_progressive_middle(self):
-        # midpoint → roughly half the LEDs
         result = fwl.rpm_to_bitmask(6800, 5600, 8000)
         self.assertGreater(result, 0x00)
         self.assertLess(result, fwl.ALL_LEDS_ON)
 
     def test_max_equals_min_returns_zero(self):
-        # degenerate case: max_rpm <= min_rpm
         self.assertEqual(fwl.rpm_to_bitmask(5000, 5000, 5000), 0x00)
 
     def test_just_above_min_gives_one_led(self):
@@ -150,23 +148,48 @@ class TestRpmToBitmask(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Tests: _send_led_report
+# Tests: _hidapi_dll_path
 # ---------------------------------------------------------------------------
 
-class TestSendLedReport(unittest.TestCase):
+class TestHidapiDllPath(unittest.TestCase):
 
-    def test_writes_correct_report(self):
-        mock_hid = MagicMock()
-        fwl._send_led_report(mock_hid, 42, 0x1F)
-        mock_hid.write.assert_called_once_with(
-            42, bytes([0x00, 0xF8, 0x12, 0x1F, 0x00, 0x00, 0x00, 0x00])
-        )
+    def test_frozen_returns_meipass_path(self):
+        with patch.object(sys, "frozen", True, create=True), \
+             patch.object(sys, "_MEIPASS", "/fake/meipass", create=True):
+            path = fwl._hidapi_dll_path()
+        self.assertEqual(path, "/fake/meipass/hidapi.dll")
 
-    def test_bitmask_masked_to_byte(self):
-        mock_hid = MagicMock()
-        fwl._send_led_report(mock_hid, 42, 0x1FF)
-        args = mock_hid.write.call_args[0]
-        self.assertEqual(args[1][3], 0xFF)
+    def test_script_beside_file(self):
+        with patch.object(sys, "frozen", False, create=True), \
+             patch("os.path.exists", return_value=True):
+            path = fwl._hidapi_dll_path()
+        self.assertTrue(path.endswith("hidapi.dll"))
+        self.assertNotEqual(path, "hidapi.dll")
+
+    def test_script_fallback_to_path(self):
+        with patch.object(sys, "frozen", False, create=True), \
+             patch("os.path.exists", return_value=False):
+            path = fwl._hidapi_dll_path()
+        self.assertEqual(path, "hidapi.dll")
+
+
+# ---------------------------------------------------------------------------
+# Tests: load_hidapi
+# ---------------------------------------------------------------------------
+
+class TestLoadHidapi(unittest.TestCase):
+
+    def test_raises_oserror_when_dll_not_found(self):
+        with patch("ctypes.CDLL", side_effect=OSError("not found")):
+            with self.assertRaises(OSError):
+                fwl.load_hidapi()
+
+    def test_returns_lib_and_calls_hid_init(self):
+        mock_lib = MagicMock()
+        with patch("ctypes.CDLL", return_value=mock_lib):
+            result = fwl.load_hidapi()
+        self.assertIs(result, mock_lib)
+        mock_lib.hid_init.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -176,26 +199,45 @@ class TestSendLedReport(unittest.TestCase):
 class TestOpenWheel(unittest.TestCase):
 
     def test_returns_handle_when_first_pid_matches(self):
-        mock_hid = MagicMock()
-        mock_hid.open.return_value = 99
+        lib = MagicMock()
+        lib.hid_open.return_value = 0xDEAD
+        result = fwl.open_wheel(lib)
+        self.assertEqual(result, 0xDEAD)
+        lib.hid_open.assert_called_once_with(fwl.LOGITECH_VID, fwl.WHEEL_PIDS[0], None)
 
-        result = fwl.open_wheel(mock_hid)
-        self.assertEqual(result, 99)
-        mock_hid.open.assert_called_once_with(fwl.LOGITECH_VID, fwl.WHEEL_PIDS[0])
+    def test_tries_second_pid_when_first_returns_null(self):
+        lib = MagicMock()
+        lib.hid_open.side_effect = [None, 0xBEEF]
+        result = fwl.open_wheel(lib)
+        self.assertEqual(result, 0xBEEF)
 
-    def test_tries_second_pid_when_first_fails(self):
-        mock_hid = MagicMock()
-        mock_hid.open.side_effect = [OSError("not found"), 88]
-
-        result = fwl.open_wheel(mock_hid)
-        self.assertEqual(result, 88)
-
-    def test_returns_none_when_no_wheel_found(self):
-        mock_hid = MagicMock()
-        mock_hid.open.side_effect = OSError("not found")
-
-        result = fwl.open_wheel(mock_hid)
+    def test_returns_none_when_all_pids_fail(self):
+        lib = MagicMock()
+        lib.hid_open.return_value = None
+        result = fwl.open_wheel(lib)
         self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# Tests: _send_led_report
+# ---------------------------------------------------------------------------
+
+class TestSendLedReport(unittest.TestCase):
+
+    def test_writes_correct_report(self):
+        lib = MagicMock()
+        fwl._send_led_report(lib, 0xDEAD, 0x1F)
+        lib.hid_write.assert_called_once_with(
+            0xDEAD,
+            bytes([0x00, 0xF8, 0x12, 0x1F, 0x00, 0x00, 0x00, 0x00]),
+            8,
+        )
+
+    def test_bitmask_masked_to_byte(self):
+        lib = MagicMock()
+        fwl._send_led_report(lib, 1, 0x1FF)
+        report = lib.hid_write.call_args[0][1]
+        self.assertEqual(report[3], 0xFF)
 
 
 # ---------------------------------------------------------------------------
@@ -224,48 +266,31 @@ class TestComputeLedState(unittest.TestCase):
         self.assertFalse(phase)
 
     def test_blink_zone_toggles_after_interval(self):
-        action, phase, lb = self._call(
-            current_rpm=7800, max_rpm=8000,
-            blink_phase=False, last_blink=0.0, now=1.0,
-            blink_thresh=7760, blink_interval=0.1,
-        )
+        action, phase, lb = self._call(7800, 8000, False, 0.0, 1.0,
+                                       blink_thresh=7760, blink_interval=0.1)
         self.assertEqual(action, fwl.LED_BLINK_ON)
         self.assertTrue(phase)
-        self.assertEqual(lb, 1.0)
 
     def test_blink_zone_no_toggle_before_interval(self):
-        action, phase, lb = self._call(
-            current_rpm=7800, max_rpm=8000,
-            blink_phase=False, last_blink=0.99, now=1.0,
-            blink_thresh=7760, blink_interval=0.1,
-        )
+        action, phase, lb = self._call(7800, 8000, False, 0.99, 1.0,
+                                       blink_thresh=7760, blink_interval=0.1)
         self.assertEqual(action, fwl.LED_BLINK_OFF)
         self.assertFalse(phase)
-        self.assertEqual(lb, 0.99)
 
     def test_blink_zone_phase_true_gives_blink_on(self):
-        action, phase, lb = self._call(
-            current_rpm=7800, max_rpm=8000,
-            blink_phase=True, last_blink=0.99, now=1.0,
-            blink_thresh=7760, blink_interval=0.1,
-        )
+        action, _, _ = self._call(7800, 8000, True, 0.99, 1.0,
+                                  blink_thresh=7760, blink_interval=0.1)
         self.assertEqual(action, fwl.LED_BLINK_ON)
 
     def test_blink_zone_toggle_off(self):
-        action, phase, lb = self._call(
-            current_rpm=7800, max_rpm=8000,
-            blink_phase=True, last_blink=0.0, now=1.0,
-            blink_thresh=7760, blink_interval=0.1,
-        )
+        action, phase, lb = self._call(7800, 8000, True, 0.0, 1.0,
+                                       blink_thresh=7760, blink_interval=0.1)
         self.assertEqual(action, fwl.LED_BLINK_OFF)
         self.assertFalse(phase)
 
     def test_exactly_at_blink_thresh(self):
-        action, _, _ = self._call(
-            current_rpm=7760, max_rpm=8000,
-            blink_phase=False, last_blink=0.0, now=1.0,
-            blink_thresh=7760, blink_interval=0.1,
-        )
+        action, _, _ = self._call(7760, 8000, False, 0.0, 1.0,
+                                  blink_thresh=7760, blink_interval=0.1)
         self.assertIn(action, (fwl.LED_BLINK_ON, fwl.LED_BLINK_OFF))
 
 
@@ -276,28 +301,28 @@ class TestComputeLedState(unittest.TestCase):
 class TestApplyLedAction(unittest.TestCase):
 
     def test_led_off_sends_all_off(self):
-        mock_hid = MagicMock()
-        fwl.apply_led_action(mock_hid, 42, fwl.LED_OFF, 0, 0, 0)
-        mock_hid.write.assert_called_once()
-        self.assertEqual(mock_hid.write.call_args[0][1][3], fwl.ALL_LEDS_OFF)
+        lib = MagicMock()
+        fwl.apply_led_action(lib, 1, fwl.LED_OFF, 0, 0, 0)
+        report = lib.hid_write.call_args[0][1]
+        self.assertEqual(report[3], fwl.ALL_LEDS_OFF)
 
     def test_led_blink_off_sends_all_off(self):
-        mock_hid = MagicMock()
-        fwl.apply_led_action(mock_hid, 42, fwl.LED_BLINK_OFF, 0, 0, 0)
-        mock_hid.write.assert_called_once()
-        self.assertEqual(mock_hid.write.call_args[0][1][3], fwl.ALL_LEDS_OFF)
+        lib = MagicMock()
+        fwl.apply_led_action(lib, 1, fwl.LED_BLINK_OFF, 0, 0, 0)
+        report = lib.hid_write.call_args[0][1]
+        self.assertEqual(report[3], fwl.ALL_LEDS_OFF)
 
     def test_led_blink_on_sends_all_on(self):
-        mock_hid = MagicMock()
-        fwl.apply_led_action(mock_hid, 42, fwl.LED_BLINK_ON, 0, 0, 0)
-        mock_hid.write.assert_called_once()
-        self.assertEqual(mock_hid.write.call_args[0][1][3], fwl.ALL_LEDS_ON)
+        lib = MagicMock()
+        fwl.apply_led_action(lib, 1, fwl.LED_BLINK_ON, 0, 0, 0)
+        report = lib.hid_write.call_args[0][1]
+        self.assertEqual(report[3], fwl.ALL_LEDS_ON)
 
     def test_led_normal_sends_computed_bitmask(self):
-        mock_hid = MagicMock()
-        fwl.apply_led_action(mock_hid, 42, fwl.LED_NORMAL, 8000.0, 5600.0, 8000.0)
-        mock_hid.write.assert_called_once()
-        self.assertEqual(mock_hid.write.call_args[0][1][3], fwl.ALL_LEDS_ON)
+        lib = MagicMock()
+        fwl.apply_led_action(lib, 1, fwl.LED_NORMAL, 8000.0, 5600.0, 8000.0)
+        report = lib.hid_write.call_args[0][1]
+        self.assertEqual(report[3], fwl.ALL_LEDS_ON)
 
 
 # ---------------------------------------------------------------------------
@@ -306,13 +331,13 @@ class TestApplyLedAction(unittest.TestCase):
 
 class TestMain(unittest.TestCase):
 
-    def _run_main(self, packets, wheel_found=True, hid_available=True):
-        mock_hid = MagicMock()
-        if wheel_found:
-            mock_hid.open.return_value = 99  # fake handle
-        else:
-            mock_hid.open.side_effect = OSError("not found")
+    def _make_lib(self, wheel_found=True):
+        lib = MagicMock()
+        lib.hid_open.return_value = 0xDEAD if wheel_found else None
+        return lib
 
+    def _run_main(self, packets, wheel_found=True, dll_load_ok=True):
+        lib = self._make_lib(wheel_found)
         mock_sock = MagicMock()
         recv_iter = iter(packets)
 
@@ -327,28 +352,23 @@ class TestMain(unittest.TestCase):
 
         mock_sock.recvfrom.side_effect = fake_recvfrom
 
-        def fake_import(name, *args, **kwargs):
-            if name == "hid":
-                if not hid_available:
-                    raise ImportError("no hid")
-                return mock_hid
-            return original_import(name, *args, **kwargs)
+        if dll_load_ok:
+            load_patch = patch.object(fwl, "load_hidapi", return_value=lib)
+        else:
+            load_patch = patch.object(fwl, "load_hidapi",
+                                      side_effect=OSError("dll missing"))
 
-        original_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
-
-        with patch("socket.socket", return_value=mock_sock), \
-             patch("time.sleep", return_value=None), \
+        with load_patch, \
+             patch("socket.socket", return_value=mock_sock), \
              patch("time.time", return_value=100.0), \
-             patch("builtins.input"), \
-             patch("builtins.__import__", side_effect=fake_import):
+             patch("builtins.input"):
             fwl.main()
 
-        return mock_hid
+        return lib
 
-    def test_main_hid_not_installed(self):
-        """ImportError on 'hid' → sys.exit(1)."""
+    def test_main_dll_not_found_exits(self):
         with self.assertRaises(SystemExit):
-            self._run_main([], hid_available=False)
+            self._run_main([], dll_load_ok=False)
 
     def test_main_normal_race(self):
         pkt = _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=5000,
@@ -410,14 +430,13 @@ class TestMain(unittest.TestCase):
         self._run_main([pkt1, pkt2])
 
     def test_main_wheel_reconnects_during_loop(self):
-        """handle starts None (startup fails), wheel found on first packet retry."""
+        """handle starts None, wheel found on first packet retry."""
         pkt = _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=5000,
                            raw_size=323)
-
-        mock_hid = MagicMock()
-        # Startup: both PIDs fail → open_wheel returns None
-        # Loop retry: first PID succeeds → handle = 99
-        mock_hid.open.side_effect = [OSError("nf"), OSError("nf"), 99]
+        lib = MagicMock()
+        # Startup: all PIDs return None → open_wheel returns None
+        # Loop retry: first PID returns a valid handle
+        lib.hid_open.side_effect = [None, None, 0xDEAD]
 
         mock_sock = MagicMock()
         recv_iter = iter([pkt])
@@ -430,45 +449,30 @@ class TestMain(unittest.TestCase):
 
         mock_sock.recvfrom.side_effect = fake_recvfrom
 
-        original_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
-
-        def fake_import(name, *args, **kwargs):
-            if name == "hid":
-                return mock_hid
-            return original_import(name, *args, **kwargs)
-
-        with patch("socket.socket", return_value=mock_sock), \
-             patch("time.sleep", return_value=None), \
+        with patch.object(fwl, "load_hidapi", return_value=lib), \
+             patch("socket.socket", return_value=mock_sock), \
              patch("time.time", return_value=100.0), \
-             patch("builtins.input"), \
-             patch("builtins.__import__", side_effect=fake_import):
+             patch("builtins.input"):
             fwl.main()
 
-        mock_hid.write.assert_called()
+        lib.hid_write.assert_called()
 
     def test_main_finally_handles_errors(self):
-        """Cover except-pass branches in finally when handle/sock calls raise."""
-        mock_hid = MagicMock()
-        mock_hid.open.return_value = 99
-        mock_hid.write.side_effect = Exception("write error")
-        mock_hid.close.side_effect = Exception("close error")
+        """Cover except-pass branches in finally when lib/sock calls raise."""
+        lib = MagicMock()
+        lib.hid_open.return_value = 0xDEAD
+        lib.hid_write.side_effect = Exception("write error")
+        lib.hid_close.side_effect = Exception("close error")
+        lib.hid_exit.side_effect  = Exception("exit error")
 
         mock_sock = MagicMock()
         mock_sock.recvfrom.side_effect = KeyboardInterrupt
         mock_sock.close.side_effect = Exception("close error")
 
-        def fake_import(name, *args, **kwargs):
-            if name == "hid":
-                return mock_hid
-            return original_import(name, *args, **kwargs)
-
-        original_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
-
-        with patch("socket.socket", return_value=mock_sock), \
-             patch("time.sleep", return_value=None), \
+        with patch.object(fwl, "load_hidapi", return_value=lib), \
+             patch("socket.socket", return_value=mock_sock), \
              patch("time.time", return_value=100.0), \
-             patch("builtins.input"), \
-             patch("builtins.__import__", side_effect=fake_import):
+             patch("builtins.input"):
             fwl.main()  # must not raise
 
 

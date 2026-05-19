@@ -49,9 +49,10 @@ No installation required. No G HUB. No drivers.
 ### Option B — Python script
 
 ```bash
-pip install hidapi
 python forza_wheel_leds.py
 ```
+
+> Also place `hidapi.dll` (x64) next to the script. Download from [libusb/hidapi releases](https://github.com/libusb/hidapi/releases/latest). Or just use the `.exe` which bundles everything.
 
 ---
 

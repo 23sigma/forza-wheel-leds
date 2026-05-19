@@ -8,7 +8,7 @@ Supported wheels: Logitech G29, G920 (direct USB HID — no G HUB required)
 
 Requirements:
   - Python 3.8+  (not needed if using the .exe release)
-  - hidapi package  (pip install hidapi)  — bundled in the .exe release
+  - hidapi.dll bundled in the .exe release (Windows inbox-independent)
 
 In-game setup (all supported Forza titles):
   Settings > HUD and Gameplay  (or Gameplay & HUD)
@@ -17,6 +17,9 @@ In-game setup (all supported Forza titles):
     Data Out IP Port     : 5607
 """
 
+import ctypes
+import ctypes.util
+import os
 import socket
 import struct
 import sys
@@ -30,77 +33,102 @@ UDP_PORT = 5607       # Must match the port set in-game
 UDP_IP   = "0.0.0.0" # Listen on all interfaces (127.0.0.1 also works)
 
 # Fraction of max RPM at which the FIRST LED lights up.
-#   0.70 → first LED at 70 % of redline  (shift-indicator feel — recommended)
-#   0.50 → first LED at 50 %             (wider spread, always visible)
 LED_MIN_RPM_RATIO = 0.70
 
 # Rev-limiter blink: LEDs flash when RPM exceeds this fraction of max RPM.
-#   0.97 → blink starts at 97 % of redline (recommended)
-#   1.00 → disable blinking
 BLINK_RPM_RATIO = 0.97
 
 # Blink frequency in Hz (on/off cycles per second).
 BLINK_HZ = 10.0
 
 # ---------------------------------------------------------------------------
-# LOGITECH G29 / G920  —  DIRECT USB HID
+# LOGITECH G29 / G920  —  DIRECT USB HID via hidapi.dll (ctypes)
 # ---------------------------------------------------------------------------
 
-# Logitech USB Vendor ID
 LOGITECH_VID = 0x046D
-
-# Known wheel Product IDs (G29 PC/PS3 mode, G920)
 WHEEL_PIDS = [
     0xC24F,  # G29 (PC / PS3 mode)
     0xC262,  # G920
 ]
 
-# HID output report: extended command 0xF8, sub-command 0x12 = LED control.
-# Byte layout (7 bytes, prepended with report-ID 0x00 by hidapi):
-#   [0] 0xF8  extended command prefix
-#   [1] 0x12  LED sub-command
-#   [2] bitmask  (bit 0 = LED1 leftmost/green … bit 4 = LED5 rightmost/red)
-#   [3..6] 0x00
-_HID_LED_PREFIX = [0xF8, 0x12]
-_HID_LED_SUFFIX = [0x00, 0x00, 0x00, 0x00]
-
-# Total of 5 LEDs on the G29 (and G920 maps them to its own 5-LED arc).
-NUM_LEDS = 5
+NUM_LEDS     = 5
 ALL_LEDS_ON  = (1 << NUM_LEDS) - 1   # 0x1F
 ALL_LEDS_OFF = 0x00
 
 
-def open_wheel(hid_module):
+def _hidapi_dll_path() -> str:
     """
-    Try to open the first recognised Logitech wheel via USB HID.
-    Returns an open device handle (int) or None if no supported wheel is found.
+    Resolve path to hidapi.dll.
+    - PyInstaller .exe: DLL is extracted to sys._MEIPASS
+    - Script mode: look next to the script, then rely on PATH
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.join(sys._MEIPASS, "hidapi.dll")  # type: ignore[attr-defined]
+    # Script mode: look next to the script first
+    beside = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hidapi.dll")
+    if os.path.exists(beside):
+        return beside
+    return "hidapi.dll"  # fall back to PATH
 
-    Uses the cython-hidapi API: hid.open(vid, pid) returns an integer handle.
+
+def load_hidapi() -> ctypes.CDLL:
+    """Load hidapi.dll and declare the function signatures we need."""
+    path = _hidapi_dll_path()
+    try:
+        lib = ctypes.CDLL(path)
+    except OSError as exc:
+        raise OSError(f"Cannot load hidapi.dll: {exc}") from exc
+
+    # hid_init() → int
+    lib.hid_init.restype  = ctypes.c_int
+    lib.hid_init.argtypes = []
+
+    # hid_exit() → int
+    lib.hid_exit.restype  = ctypes.c_int
+    lib.hid_exit.argtypes = []
+
+    # hid_open(vendor_id, product_id, serial_number=NULL) → hid_device*
+    lib.hid_open.restype  = ctypes.c_void_p
+    lib.hid_open.argtypes = [ctypes.c_ushort, ctypes.c_ushort, ctypes.c_wchar_p]
+
+    # hid_close(device) → void
+    lib.hid_close.restype  = None
+    lib.hid_close.argtypes = [ctypes.c_void_p]
+
+    # hid_write(device, data, length) → int
+    lib.hid_write.restype  = ctypes.c_int
+    lib.hid_write.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+
+    lib.hid_init()
+    return lib
+
+
+def open_wheel(lib: ctypes.CDLL):
+    """
+    Try to open the first recognised Logitech wheel.
+    Returns a non-NULL c_void_p handle, or None if no wheel found.
     """
     for pid in WHEEL_PIDS:
-        try:
-            handle = hid_module.open(LOGITECH_VID, pid)
+        handle = lib.hid_open(LOGITECH_VID, pid, None)
+        if handle:
             return handle
-        except OSError:
-            continue
     return None
 
 
-def _send_led_report(hid_module, handle, bitmask: int) -> None:
-    """Write a 7-byte LED control output report to the HID device."""
-    # cython-hidapi: hid.write(handle, data) — data is bytes, first byte is report ID.
+def _send_led_report(lib: ctypes.CDLL, handle, bitmask: int) -> None:
+    """Write the 8-byte LED control output report (report-ID 0x00 + 7 bytes)."""
     report = bytes([0x00, 0xF8, 0x12, bitmask & 0xFF, 0x00, 0x00, 0x00, 0x00])
-    hid_module.write(handle, report)
+    lib.hid_write(handle, report, len(report))
 
+
+# ---------------------------------------------------------------------------
+# RPM → LED BITMASK
+# ---------------------------------------------------------------------------
 
 def rpm_to_bitmask(current_rpm: float, min_rpm: float, max_rpm: float) -> int:
     """
-    Convert an RPM value to a 5-bit LED bitmask.
-
-    LEDs light up progressively from left (bit 0) to right (bit 4) as
-    current_rpm rises from min_rpm to max_rpm.
-
-    Returns 0x00 if current_rpm < min_rpm, 0x1F if current_rpm >= max_rpm.
+    Convert RPM to a 5-bit LED bitmask.
+    LEDs light progressively from left (bit 0) to right (bit 4).
     """
     if max_rpm <= min_rpm:
         return ALL_LEDS_OFF
@@ -108,9 +136,7 @@ def rpm_to_bitmask(current_rpm: float, min_rpm: float, max_rpm: float) -> int:
         return ALL_LEDS_OFF
     if current_rpm >= max_rpm:
         return ALL_LEDS_ON
-
     ratio = (current_rpm - min_rpm) / (max_rpm - min_rpm)
-    # Number of LEDs to light: 1..NUM_LEDS
     n_lit = max(1, round(ratio * NUM_LEDS))
     return (1 << n_lit) - 1
 
@@ -118,15 +144,6 @@ def rpm_to_bitmask(current_rpm: float, min_rpm: float, max_rpm: float) -> int:
 # ---------------------------------------------------------------------------
 # FORZA PACKET PARSING
 # ---------------------------------------------------------------------------
-
-# FH5 / FH6 raw packet = 323 bytes.
-# Bytes 232–243 are a 12-byte padding gap specific to FH4/FH5/FH6.
-# After skipping that gap we get 311 bytes that map to DASH_FORMAT below.
-#
-# FM2023 raw packet = 331 bytes.
-# It carries the same gap, plus 8 extra bytes at the tail
-# (TireWear x4 floats + TrackOrdinal s32).  We ignore the tail for now
-# and apply the same gap fix so the same parser works for both titles.
 
 DASH_FORMAT = (
     "<iI"        # [0]  IsRaceOn (s32), TimestampMS (u32)
@@ -158,14 +175,12 @@ DASH_FORMAT = (
     "bbb"        # [82] Steer, NormalizedDrivingLine, NormalizedAIBrakeDifference (s8)
 )
 
-# Field indices in the unpacked tuple
 IDX_IS_RACE_ON      = 0
 IDX_ENGINE_MAX_RPM  = 2
 IDX_ENGINE_IDLE_RPM = 3
 IDX_CURRENT_RPM     = 4
-IDX_GEAR            = 81  # 5th entry in the BBBBB block (0-indexed)
+IDX_GEAR            = 81
 
-# Raw packet sizes used for game detection
 SIZE_FH5_FH6 = 323
 SIZE_FM2023  = 331
 
@@ -177,15 +192,14 @@ GAME_LABELS = {
 
 def patch_and_parse(data: bytes):
     """
-    Remove the 12-byte FH4/FH5/FH6 gap (bytes 232–243),
-    unpack the struct, and return a named dict of the fields we care about.
+    Remove the 12-byte FH4/FH5/FH6 gap (bytes 232–243), unpack the struct.
     Returns None if the packet size is not recognised.
     """
     size = len(data)
     if size not in (SIZE_FH5_FH6, SIZE_FM2023):
         return None
 
-    patched = data[:232] + data[244:323]  # always 311 bytes after patch
+    patched = data[:232] + data[244:323]
 
     try:
         vals = struct.unpack_from(DASH_FORMAT, patched)
@@ -206,11 +220,10 @@ def patch_and_parse(data: bytes):
 # LED STATE LOGIC  (pure — no side effects, fully testable)
 # ---------------------------------------------------------------------------
 
-# LED actions returned by compute_led_state()
-LED_OFF       = "off"        # all LEDs off (menu / no race)
-LED_NORMAL    = "normal"     # progressive LEDs (normal RPM range)
-LED_BLINK_ON  = "blink_on"  # all LEDs on  (rev-limiter blink phase)
-LED_BLINK_OFF = "blink_off" # all LEDs off (rev-limiter blink phase)
+LED_OFF       = "off"
+LED_NORMAL    = "normal"
+LED_BLINK_ON  = "blink_on"
+LED_BLINK_OFF = "blink_off"
 
 
 def compute_led_state(
@@ -222,24 +235,6 @@ def compute_led_state(
     blink_thresh: float,
     blink_interval: float,
 ) -> tuple:
-    """
-    Pure function: given the current telemetry and blink state, return
-    (action, new_blink_phase, new_last_blink).
-
-    Parameters
-    ----------
-    current_rpm    : current engine RPM
-    max_rpm        : engine max (redline) RPM
-    blink_phase    : current blink phase (True = LEDs on)
-    last_blink     : timestamp of last blink toggle
-    now            : current timestamp
-    blink_thresh   : RPM threshold above which blinking starts
-    blink_interval : seconds between blink toggles (= 1 / BLINK_HZ)
-
-    Returns
-    -------
-    (action, new_blink_phase, new_last_blink)
-    """
     if current_rpm >= blink_thresh:
         if now - last_blink >= blink_interval:
             blink_phase = not blink_phase
@@ -256,15 +251,14 @@ def compute_led_state(
 # HID LED APPLICATION
 # ---------------------------------------------------------------------------
 
-def apply_led_action(hid_module, handle, action: str, current_rpm: float, min_rpm: float, max_rpm: float) -> None:
-    """Apply a LED action (returned by compute_led_state) to the wheel via HID."""
+def apply_led_action(lib: ctypes.CDLL, handle, action: str,
+                     current_rpm: float, min_rpm: float, max_rpm: float) -> None:
     if action == LED_OFF or action == LED_BLINK_OFF:
-        _send_led_report(hid_module, handle, ALL_LEDS_OFF)
+        _send_led_report(lib, handle, ALL_LEDS_OFF)
     elif action == LED_BLINK_ON:
-        _send_led_report(hid_module, handle, ALL_LEDS_ON)
+        _send_led_report(lib, handle, ALL_LEDS_ON)
     else:  # LED_NORMAL
-        bitmask = rpm_to_bitmask(current_rpm, min_rpm, max_rpm)
-        _send_led_report(hid_module, handle, bitmask)
+        _send_led_report(lib, handle, rpm_to_bitmask(current_rpm, min_rpm, max_rpm))
 
 
 # ---------------------------------------------------------------------------
@@ -275,28 +269,32 @@ def main() -> None:
     print("=" * 58)
     print("  forza-wheel-leds  |  Logitech G29 / G920 RPM LEDs")
     print("=" * 58)
-    print(f"  Version        : 1.1.0")
+    print(f"  Version        : 1.2.0")
     print(f"  Listening on   : {UDP_IP}:{UDP_PORT}")
     print(f"  LED min RPM    : {int(LED_MIN_RPM_RATIO * 100)} % of redline")
     print(f"  Blink at       : {int(BLINK_RPM_RATIO * 100)} % of redline  ({BLINK_HZ:.0f} Hz)")
     print("=" * 58)
     print()
 
-    # --- HID wheel ---
+    # --- Load hidapi.dll ---
     try:
-        import hid as hid_module
-    except ImportError:
-        print("[ERROR] 'hidapi' package not found.")
-        print("        Install it with:  pip install hidapi")
+        lib = load_hidapi()
+    except OSError as exc:
+        print(f"[ERROR] {exc}")
+        print()
+        print("        The .exe release bundles hidapi.dll automatically.")
+        print("        If running the .py script, place hidapi.dll next to it.")
+        print("        Download from: https://github.com/libusb/hidapi/releases")
         print()
         input("  Press Enter to close this window …")
         sys.exit(1)
 
-    handle = open_wheel(hid_module)
+    # --- Open wheel ---
+    handle = open_wheel(lib)
     if handle is None:
         print("[WARN] No supported Logitech wheel detected (G29 / G920).")
         print("       Make sure the wheel is plugged in via USB.")
-        print("       LEDs will not work until the wheel is connected.")
+        print("       LEDs will activate once the wheel is connected.")
         print()
     else:
         print("[OK]   Logitech wheel connected via USB HID.")
@@ -336,19 +334,18 @@ def main() -> None:
                       f"— size {len(data)} bytes (unrecognised format)   ", end="\r")
                 continue
 
-            # Announce game change
             if packet["game"] != last_game:
                 print(f"\n[INFO] Game detected: {packet['game']}")
                 last_game = packet["game"]
 
             if handle is None:
-                handle = open_wheel(hid_module)
+                handle = open_wheel(lib)
                 if handle is not None:
                     print("\n[OK]   Logitech wheel connected via USB HID.")
 
             if packet["max_rpm"] <= 0:
                 if handle is not None:
-                    apply_led_action(hid_module, handle, LED_OFF, 0, 0, 0)
+                    apply_led_action(lib, handle, LED_OFF, 0, 0, 0)
                 print("  In menu — LEDs off …                   ", end="\r")
                 continue
 
@@ -366,7 +363,8 @@ def main() -> None:
             )
 
             if handle is not None:
-                apply_led_action(hid_module, handle, action, packet["current_rpm"], min_rpm, packet["max_rpm"])
+                apply_led_action(lib, handle, action,
+                                 packet["current_rpm"], min_rpm, packet["max_rpm"])
 
             blink_str = " *** REDLINE ***" if action in (LED_BLINK_ON, LED_BLINK_OFF) else ""
             gear_str  = "R" if packet["gear"] == 0 else str(packet["gear"])
@@ -382,8 +380,9 @@ def main() -> None:
     finally:
         try:
             if handle is not None:
-                _send_led_report(hid_module, handle, ALL_LEDS_OFF)
-                hid_module.close(handle)
+                _send_led_report(lib, handle, ALL_LEDS_OFF)
+                lib.hid_close(handle)
+            lib.hid_exit()
         except Exception:
             pass
         try:
