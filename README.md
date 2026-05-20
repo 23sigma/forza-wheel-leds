@@ -119,6 +119,17 @@ blink_rpm_ratio = 0.90
 
 ; Blink frequency in Hz
 blink_hz = 10
+
+[forward]
+; Forward the raw telemetry stream to additional destinations.
+; Useful if you also run a sim-racing companion app (e.g. on your phone).
+; Set Forza Data Out to 127.0.0.1:5607 — this tool receives it and
+; rebroadcasts to every target listed here.
+;
+; Format: comma-separated list of  host:port
+; Example:
+;   targets = 192.168.1.42:5607, 127.0.0.1:5608
+targets =
 ```
 
 If `config.ini` is absent or a key is missing, the default value is used.

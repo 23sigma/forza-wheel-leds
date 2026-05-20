@@ -98,4 +98,4 @@ jobs:
             - Logitech G29 or G920 plugged in via USB
           files: "forza_wheel_leds_${{ github.ref_name }}.zip"
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

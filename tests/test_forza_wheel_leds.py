@@ -260,6 +260,78 @@ class TestLoadConfig(unittest.TestCase):
             os.unlink(ini)
         self.assertEqual(cfg["udp_port"], fwl.UDP_PORT)
 
+    def test_forward_targets_parsed(self):
+        ini = self._write_ini(
+            "[settings]\n"
+            "[forward]\n"
+            "targets = 192.168.1.42:5607, 127.0.0.1:5608\n"
+        )
+        try:
+            cfg = fwl.load_config(ini)
+        finally:
+            os.unlink(ini)
+        self.assertEqual(cfg["forward_targets"],
+                         [("192.168.1.42", 5607), ("127.0.0.1", 5608)])
+
+    def test_forward_targets_empty(self):
+        cfg = fwl.load_config("/nonexistent/config.ini")
+        self.assertEqual(cfg["forward_targets"], [])
+
+    def test_forward_targets_malformed_ignored(self):
+        ini = self._write_ini(
+            "[forward]\n"
+            "targets = notavalidentry, 192.168.1.1:5607\n"
+        )
+        try:
+            cfg = fwl.load_config(ini)
+        finally:
+            os.unlink(ini)
+        self.assertEqual(cfg["forward_targets"], [("192.168.1.1", 5607)])
+
+    def test_forward_targets_blank(self):
+        ini = self._write_ini("[forward]\ntargets =\n")
+        try:
+            cfg = fwl.load_config(ini)
+        finally:
+            os.unlink(ini)
+        self.assertEqual(cfg["forward_targets"], [])
+
+    def test_forward_targets_trailing_comma(self):
+        """Trailing comma produces an empty entry that should be skipped."""
+        ini = self._write_ini("[forward]\ntargets = 192.168.1.1:5607,\n")
+        try:
+            cfg = fwl.load_config(ini)
+        finally:
+            os.unlink(ini)
+        self.assertEqual(cfg["forward_targets"], [("192.168.1.1", 5607)])
+
+
+# ---------------------------------------------------------------------------
+# Tests: forward_packet
+# ---------------------------------------------------------------------------
+
+class TestForwardPacket(unittest.TestCase):
+
+    def test_sends_to_all_targets(self):
+        mock_sock = MagicMock()
+        data = b"\x01\x02\x03"
+        targets = [("192.168.1.42", 5607), ("127.0.0.1", 5608)]
+        fwl.forward_packet(mock_sock, data, targets)
+        mock_sock.sendto.assert_any_call(data, ("192.168.1.42", 5607))
+        mock_sock.sendto.assert_any_call(data, ("127.0.0.1", 5608))
+        self.assertEqual(mock_sock.sendto.call_count, 2)
+
+    def test_empty_targets_sends_nothing(self):
+        mock_sock = MagicMock()
+        fwl.forward_packet(mock_sock, b"\x00", [])
+        mock_sock.sendto.assert_not_called()
+
+    def test_oserror_is_swallowed(self):
+        mock_sock = MagicMock()
+        mock_sock.sendto.side_effect = OSError("network unreachable")
+        # must not raise
+        fwl.forward_packet(mock_sock, b"\x00", [("10.0.0.1", 9999)])
+
 
 # ---------------------------------------------------------------------------
 # Tests: load_hidapi
@@ -542,6 +614,41 @@ class TestMain(unittest.TestCase):
         pkt1 = _pack_packet(raw_size=323)
         pkt2 = _pack_packet(raw_size=331)
         self._run_main([pkt1, pkt2])
+
+    def test_main_forward_targets_displayed_and_called(self):
+        """Forwarding targets in config are shown in banner and packets are forwarded."""
+        pkt = _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=5000,
+                           raw_size=323)
+        lib = self._make_lib(wheel_found=True)
+        mock_sock = MagicMock()
+        recv_iter = iter([pkt])
+
+        def fake_recvfrom(_):
+            try:
+                return next(recv_iter), ("127.0.0.1", 5607)
+            except StopIteration:
+                raise KeyboardInterrupt
+
+        mock_sock.recvfrom.side_effect = fake_recvfrom
+
+        fake_cfg = {
+            "udp_port": 5607,
+            "led_min_rpm_ratio": fwl.LED_MIN_RPM_RATIO,
+            "blink_rpm_ratio": fwl.BLINK_RPM_RATIO,
+            "blink_hz": fwl.BLINK_HZ,
+            "forward_targets": [("192.168.1.42", 5607)],
+        }
+
+        with patch.object(fwl, "load_hidapi", return_value=lib), \
+             patch("socket.socket", return_value=mock_sock), \
+             patch("time.time", return_value=100.0), \
+             patch.object(fwl, "_config_path", return_value="/fake/config.ini"), \
+             patch.object(fwl, "load_config", return_value=fake_cfg), \
+             patch("os.path.exists", return_value=True), \
+             patch("builtins.input"):
+            fwl.main()
+
+        mock_sock.sendto.assert_called_with(pkt, ("192.168.1.42", 5607))
 
     def test_main_wheel_reconnects_during_loop(self):
         """handle starts None, wheel found on first packet retry."""

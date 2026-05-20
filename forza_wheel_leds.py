@@ -69,11 +69,27 @@ def load_config(path: str) -> dict:
         except ValueError:
             return int(default)
 
+    # [forward] section: targets = ip:port, ip:port, ...
+    forward_targets = []
+    if "forward" in cfg:
+        raw = cfg["forward"].get("targets", "").strip()
+        if raw:
+            for entry in raw.split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                try:
+                    host, port_str = entry.rsplit(":", 1)
+                    forward_targets.append((host.strip(), int(port_str.strip())))
+                except ValueError:
+                    pass  # ignore malformed entries
+
     return {
         "udp_port":          _int  ("udp_port",          UDP_PORT),
         "led_min_rpm_ratio": _float("led_min_rpm_ratio", LED_MIN_RPM_RATIO),
         "blink_rpm_ratio":   _float("blink_rpm_ratio",   BLINK_RPM_RATIO),
         "blink_hz":          _float("blink_hz",          BLINK_HZ),
+        "forward_targets":   forward_targets,
     }
 
 # ---------------------------------------------------------------------------
@@ -299,6 +315,20 @@ def apply_led_action(lib: ctypes.CDLL, handle, action: str,
 
 
 # ---------------------------------------------------------------------------
+# UDP FORWARDER
+# ---------------------------------------------------------------------------
+
+def forward_packet(sock: socket.socket, data: bytes,
+                   targets: list) -> None:
+    """Rebroadcast raw UDP packet to every (host, port) in targets."""
+    for host, port in targets:
+        try:
+            sock.sendto(data, (host, port))
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 
@@ -312,17 +342,21 @@ def main() -> None:
     blink_rpm_ratio   = cfg["blink_rpm_ratio"]
     blink_hz          = cfg["blink_hz"]
     blink_interval    = 1.0 / blink_hz
+    forward_targets   = cfg["forward_targets"]
 
     cfg_source = "config.ini" if os.path.exists(cfg_path) else "defaults"
 
     print("=" * 58)
     print("  forza-wheel-leds  |  Logitech G29 / G920 RPM LEDs")
     print("=" * 58)
-    print(f"  Version        : 1.3.2")
+    print(f"  Version        : 1.4.0")
     print(f"  Config         : {cfg_source}")
     print(f"  Listening on   : {UDP_IP}:{udp_port}")
     print(f"  LED min RPM    : {int(led_min_rpm_ratio * 100)} % of redline")
     print(f"  Blink at       : {int(blink_rpm_ratio * 100)} % of redline  ({blink_hz:.0f} Hz)")
+    if forward_targets:
+        for host, port in forward_targets:
+            print(f"  Forwarding to  : {host}:{port}")
     print("=" * 58)
     print()
 
@@ -376,6 +410,9 @@ def main() -> None:
                 data, addr = sock.recvfrom(2048)
             except socket.timeout:
                 continue
+
+            if forward_targets:
+                forward_packet(sock, data, forward_targets)
 
             packet = patch_and_parse(data)
             if packet is None:
