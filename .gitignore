@@ -13,6 +13,11 @@ build/
 dist/
 *.spec
 
+# hidapi.dll — downloaded by CI, not tracked in repo
+hidapi.dll
+hidapi-win.zip
+hidapi-win/
+
 # OS
 .DS_Store
 Thumbs.db
