@@ -378,7 +378,7 @@ def main() -> None:
     # --- Open wheel ---
     handle = open_wheel(lib)
     if handle is None:
-        print("[WARN] No supported Logitech wheel detected (G29 / G920).")
+        print("[WARN] No supported Logitech wheel detected (G29 / G920 / G923).")
         print("       Make sure the wheel is plugged in via USB.")
         print("       LEDs will activate once the wheel is connected.")
         print()
