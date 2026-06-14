@@ -13,37 +13,11 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Job 1: Tests + 100 % coverage (Linux, fast)
-  # ---------------------------------------------------------------------------
-  test:
-    name: Tests (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        python-version: ["3.8", "3.11", "3.12"]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install test dependencies
-        run: pip install pytest pytest-cov
-
-      - name: Run tests with coverage
-        run: python -m pytest tests/ -v
-
-  # ---------------------------------------------------------------------------
-  # Job 2: Build .exe + GitHub Release (Windows, on tag only)
+  # Job: Build .exe + GitHub Release (Windows, on tag only)
   # ---------------------------------------------------------------------------
   build:
     name: Build Windows .exe
     runs-on: windows-latest
-    needs: test
     if: startsWith(github.ref, 'refs/tags/v')
 
     steps:

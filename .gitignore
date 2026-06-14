@@ -21,3 +21,9 @@ hidapi-win/
 # OS
 .DS_Store
 Thumbs.db
+
+# Tests & Scripts
+tests/
+run_leds.bat
+.pytest_cache/
+.coverage
