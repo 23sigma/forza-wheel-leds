@@ -93,6 +93,7 @@ Data Out IP Port     : 5607
 - Is the wheel plugged in via USB?
 - Did you set Data Out to ON in Forza and use port `5607`?
 - Make sure the wheel is in **PC mode** (not console mode).
+- If your in-game Data Out settings are correctly pointing to the right port and `127.0.0.1` but the LEDs still do not light up, try uninstalling and reinstalling Logitech G HUB, then restarting your computer.
 
 **`[WARN] No supported Logitech wheel detected`**
 - Plug in the wheel before launching the tool, or restart the tool after plugging in.
