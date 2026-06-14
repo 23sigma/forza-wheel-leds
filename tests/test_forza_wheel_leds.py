@@ -36,6 +36,8 @@ def _pack_packet(
     max_rpm: float = 8000.0,
     idle_rpm: float = 800.0,
     current_rpm: float = 5000.0,
+    car_ordinal: int = 1234,
+    accel: int = 0,
     gear: int = 3,
     raw_size: int = 323,
 ) -> bytes:
@@ -46,6 +48,8 @@ def _pack_packet(
     vals[2] = max_rpm
     vals[3] = idle_rpm
     vals[4] = current_rpm
+    vals[53] = car_ordinal
+    vals[77] = accel
     vals[81] = gear
 
     patched = struct.pack(DASH_FORMAT, *vals)
@@ -168,7 +172,7 @@ class TestHidapiDllPath(unittest.TestCase):
         with patch.object(sys, "frozen", True, create=True), \
              patch.object(sys, "_MEIPASS", "/fake/meipass", create=True):
             path = fwl._hidapi_dll_path()
-        self.assertEqual(path, "/fake/meipass/hidapi.dll")
+        self.assertEqual(os.path.normpath(path), os.path.normpath("/fake/meipass/hidapi.dll"))
 
     def test_script_beside_file(self):
         with patch.object(sys, "frozen", False, create=True), \
@@ -219,7 +223,8 @@ class TestLoadConfig(unittest.TestCase):
         cfg = fwl.load_config("/nonexistent/config.ini")
         self.assertEqual(cfg["udp_port"],          fwl.UDP_PORT)
         self.assertAlmostEqual(cfg["led_min_rpm_ratio"], fwl.LED_MIN_RPM_RATIO)
-        self.assertAlmostEqual(cfg["blink_rpm_ratio"],   fwl.BLINK_RPM_RATIO)
+        self.assertEqual(cfg["blink_offset_low_gear_rpm"],   fwl.BLINK_OFFSET_LOW_GEAR_RPM)
+        self.assertEqual(cfg["blink_offset_high_gear_rpm"],   fwl.BLINK_OFFSET_HIGH_GEAR_RPM)
         self.assertAlmostEqual(cfg["blink_hz"],          fwl.BLINK_HZ)
 
     def test_reads_all_keys(self):
@@ -227,7 +232,8 @@ class TestLoadConfig(unittest.TestCase):
             "[settings]\n"
             "udp_port=1234\n"
             "led_min_rpm_ratio=0.65\n"
-            "blink_rpm_ratio=0.95\n"
+            "blink_offset_low_gear_rpm=150\n"
+            "blink_offset_high_gear_rpm=100\n"
             "blink_hz=8\n"
         )
         try:
@@ -236,7 +242,8 @@ class TestLoadConfig(unittest.TestCase):
             os.unlink(ini)
         self.assertEqual(cfg["udp_port"], 1234)
         self.assertAlmostEqual(cfg["led_min_rpm_ratio"], 0.65)
-        self.assertAlmostEqual(cfg["blink_rpm_ratio"],   0.95)
+        self.assertEqual(cfg["blink_offset_low_gear_rpm"],   150)
+        self.assertEqual(cfg["blink_offset_high_gear_rpm"],   100)
         self.assertAlmostEqual(cfg["blink_hz"],          8.0)
 
     def test_invalid_values_fall_back_to_defaults(self):
@@ -305,6 +312,67 @@ class TestLoadConfig(unittest.TestCase):
             os.unlink(ini)
         self.assertEqual(cfg["forward_targets"], [("192.168.1.1", 5607)])
 
+    def test_save_config(self):
+        ini = self._write_ini("[settings]\n")
+        try:
+            settings = {
+                "udp_port": 9999,
+                "led_min_rpm_ratio": 0.75,
+                "blink_offset_low_gear_rpm": 300,
+                "blink_offset_high_gear_rpm": 250,
+                "use_auto_redline": True,
+                "blink_hz": 12.0
+            }
+            fwl.save_config(ini, settings)
+            cfg = fwl.load_config(ini)
+            self.assertEqual(cfg["udp_port"], 9999)
+            self.assertAlmostEqual(cfg["led_min_rpm_ratio"], 0.75)
+            self.assertEqual(cfg["blink_offset_low_gear_rpm"], 300)
+            self.assertEqual(cfg["blink_offset_high_gear_rpm"], 250)
+            self.assertTrue(cfg["use_auto_redline"])
+            self.assertAlmostEqual(cfg["blink_hz"], 12.0)
+        finally:
+            if os.path.exists(ini):
+                os.unlink(ini)
+
+    def test_save_config_oserror(self):
+        with patch("builtins.open", side_effect=OSError("write error")):
+            fwl.save_config("/fake/config.ini", {
+                "udp_port": 1234, 
+                "led_min_rpm_ratio": 0.65, 
+                "blink_offset_low_gear_rpm": 250, 
+                "blink_offset_high_gear_rpm": 200, 
+                "use_auto_redline": True, 
+                "blink_hz": 10.0
+            })
+            # should swallow the error and not raise
+
+    def test_load_car_sections(self):
+        ini = self._write_ini(
+            "[settings]\n"
+            "udp_port=1234\n"
+            "[car_1234]\n"
+            "redline=8200.0\n"
+            "nominal_max_rpm=8000.0\n"
+            "led_min_rpm_ratio=0.65\n"
+            "blink_offset_low_gear_rpm=150\n"
+            "blink_offset_high_gear_rpm=100\n"
+            "blink_hz=10.0\n"
+            "[car_bad]\n"
+            "redline=invalid\n"
+        )
+        try:
+            cfg = fwl.load_config(ini)
+        finally:
+            os.unlink(ini)
+        self.assertIn(1234, cfg["cars"])
+        c = cfg["cars"][1234]
+        self.assertEqual(c["redline"], 8200.0)
+        self.assertEqual(c["nominal_max_rpm"], 8000.0)
+        self.assertEqual(c["led_min_rpm_ratio"], 0.65)
+        self.assertEqual(c["blink_offset_low_gear_rpm"], 150)
+        self.assertEqual(c["blink_offset_high_gear_rpm"], 100)
+        self.assertEqual(c["blink_hz"], 10.0)
 
 # ---------------------------------------------------------------------------
 # Tests: forward_packet
@@ -409,7 +477,8 @@ class TestComputeLedState(unittest.TestCase):
     def _call(self, current_rpm, max_rpm, blink_phase, last_blink, now,
               blink_thresh=None, blink_interval=0.1):
         if blink_thresh is None:
-            blink_thresh = max_rpm * fwl.BLINK_RPM_RATIO
+            min_rpm = max_rpm * fwl.LED_MIN_RPM_RATIO
+            blink_thresh = max(min_rpm + 100, max_rpm - fwl.BLINK_OFFSET_LOW_GEAR_RPM)
         return fwl.compute_led_state(
             current_rpm, max_rpm, blink_phase, last_blink, now,
             blink_thresh, blink_interval,
@@ -496,7 +565,7 @@ class TestMain(unittest.TestCase):
         lib.hid_open.return_value = 0xDEAD if wheel_found else None
         return lib
 
-    def _run_main(self, packets, wheel_found=True, dll_load_ok=True):
+    def _run_main(self, packets, wheel_found=True, dll_load_ok=True, kb_presses=None):
         lib = self._make_lib(wheel_found)
         mock_sock = MagicMock()
         recv_iter = iter(packets)
@@ -518,12 +587,24 @@ class TestMain(unittest.TestCase):
             load_patch = patch.object(fwl, "load_hidapi",
                                       side_effect=OSError("dll missing"))
 
+        presses = kb_presses or []
+        
+        def fake_kbhit():
+            return len(presses) > 0
+
+        def fake_getch():
+            if len(presses) > 0:
+                return presses.pop(0)
+            return b''
+
         with load_patch, \
              patch("socket.socket", return_value=mock_sock), \
              patch("time.time", return_value=100.0), \
              patch.object(fwl, "_config_path", return_value="/fake/config.ini"), \
              patch("os.path.exists", return_value=False), \
-             patch("builtins.input"):
+             patch("builtins.input"), \
+             patch("msvcrt.kbhit", new=fake_kbhit), \
+             patch("msvcrt.getch", new=fake_getch):
             fwl.main()
 
         return lib
@@ -634,8 +715,10 @@ class TestMain(unittest.TestCase):
         fake_cfg = {
             "udp_port": 5607,
             "led_min_rpm_ratio": fwl.LED_MIN_RPM_RATIO,
-            "blink_rpm_ratio": fwl.BLINK_RPM_RATIO,
+            "blink_offset_low_gear_rpm": fwl.BLINK_OFFSET_LOW_GEAR_RPM,
+            "blink_offset_high_gear_rpm": fwl.BLINK_OFFSET_HIGH_GEAR_RPM,
             "blink_hz": fwl.BLINK_HZ,
+            "use_auto_redline": fwl.USE_AUTO_REDLINE,
             "forward_targets": [("192.168.1.42", 5607)],
         }
 
@@ -657,7 +740,7 @@ class TestMain(unittest.TestCase):
         lib = MagicMock()
         # Startup: all PIDs return None → open_wheel returns None
         # Loop retry: first PID returns a valid handle
-        lib.hid_open.side_effect = [None, None, 0xDEAD]
+        lib.hid_open.side_effect = [None]*5 + [0xDEAD]
 
         mock_sock = MagicMock()
         recv_iter = iter([pkt])
@@ -700,6 +783,205 @@ class TestMain(unittest.TestCase):
              patch("builtins.input"):
             fwl.main()  # must not raise
 
+    def test_main_loop_and_kb(self):
+        class BadStr:
+            def __str__(self):
+                raise ValueError("bad string representation")
+
+        pkts = [
+            _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=7000, accel=255, gear=3, raw_size=323),
+            _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=6800, accel=255, gear=3, raw_size=323),
+            _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=7000, accel=255, gear=3, raw_size=323),
+            _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=6800, accel=255, gear=3, raw_size=323),
+            _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=7000, accel=255, gear=3, raw_size=323),
+            _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=6800, accel=255, gear=3, raw_size=323),
+            _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=6800, accel=255, gear=3, raw_size=323),
+        ]
+        kb = [
+            b'\xe0', b'h',
+            b'\xe0', b'p',
+            b'\xe0', b'k',
+            b'\xe0', b'm',
+            b's',
+            b'x',
+            b'r',
+            BadStr()
+        ]
+        self._run_main(pkts, kb_presses=kb)
+
+    def test_main_keyboard_save_and_autosave(self):
+        mock_detector = MagicMock()
+        mock_detector.is_locked.return_value = True
+        mock_detector.get_limiter.return_value = 8200.0
+        mock_detector.car_data = {
+            1234: {"max_seen": 8200.0, "nominal_max_rpm": 8000.0}
+        }
+
+        pkt = _pack_packet(is_race_on=1, max_rpm=8000, current_rpm=5000, car_ordinal=1234, accel=255, raw_size=323)
+
+        packet_count = [0]
+        kb_queue = [b's']
+
+        def fake_kbhit():
+            return packet_count[0] > 0 and len(kb_queue) > 0
+
+        def fake_getch():
+            if len(kb_queue) > 0:
+                return kb_queue.pop(0)
+            return b''
+
+        mock_sock = MagicMock()
+        def fake_recvfrom(_):
+            if packet_count[0] == 0:
+                packet_count[0] += 1
+                return pkt, ("127.0.0.1", 5607)
+            else:
+                raise KeyboardInterrupt
+
+        mock_sock.recvfrom.side_effect = fake_recvfrom
+
+        fake_cfg = {
+            "udp_port": 5607,
+            "led_min_rpm_ratio": fwl.LED_MIN_RPM_RATIO,
+            "blink_offset_low_gear_rpm": fwl.BLINK_OFFSET_LOW_GEAR_RPM,
+            "blink_offset_high_gear_rpm": fwl.BLINK_OFFSET_HIGH_GEAR_RPM,
+            "blink_hz": fwl.BLINK_HZ,
+            "use_auto_redline": True,
+            "forward_targets": [],
+            "cars": {
+                1234: {
+                    "redline": 8200.0,
+                    "nominal_max_rpm": 8000.0,
+                    "led_min_rpm_ratio": 0.55,
+                    "blink_offset_low_gear_rpm": 200,
+                    "blink_offset_high_gear_rpm": 150,
+                    "blink_hz": 15.0
+                }
+            }
+        }
+
+        lib = self._make_lib(wheel_found=True)
+
+        with patch.object(fwl, "load_hidapi", return_value=lib), \
+             patch("socket.socket", return_value=mock_sock), \
+             patch("time.time", return_value=100.0), \
+             patch.object(fwl, "_config_path", return_value="/fake/config.ini"), \
+             patch.object(fwl, "load_config", return_value=fake_cfg), \
+             patch("os.path.exists", return_value=True), \
+             patch("builtins.input"), \
+             patch("msvcrt.kbhit", new=fake_kbhit), \
+             patch("msvcrt.getch", new=fake_getch), \
+             patch.object(fwl, "RedlineDetector", return_value=mock_detector), \
+             patch.object(fwl, "save_config") as mock_save:
+            fwl.main()
+
+        self.assertTrue(mock_save.called)
+        self.assertIn("cars", fake_cfg)
+        self.assertIn(1234, fake_cfg["cars"])
+        self.assertEqual(fake_cfg["cars"][1234]["redline"], 8200.0)
+
+# ---------------------------------------------------------------------------
+# Tests: RedlineDetector
+# ---------------------------------------------------------------------------
+
+class TestRedlineDetector(unittest.TestCase):
+    def test_locked_after_bounces(self):
+        d = fwl.RedlineDetector()
+        r = d.get_limiter(car_ordinal=1, current_rpm=7000.0, accel=255, game_max_rpm=8000.0)
+        self.assertEqual(r, 8000.0)
+        self.assertFalse(d.is_locked(1))
+        
+        r = d.get_limiter(car_ordinal=1, current_rpm=8100.0, accel=200, game_max_rpm=8000.0)
+        self.assertEqual(r, 8000.0)
+        self.assertFalse(d.is_locked(1))
+        
+        r = d.get_limiter(car_ordinal=1, current_rpm=8100.0, accel=255, game_max_rpm=8000.0)
+        self.assertEqual(r, 8000.0)
+        self.assertEqual(d.car_data[1]["max_seen"], 8100.0)
+        
+        r = d.get_limiter(car_ordinal=1, current_rpm=7900.0, accel=255, game_max_rpm=8000.0)
+        self.assertEqual(d.car_data[1]["bounces"], 1)
+        self.assertFalse(d.is_locked(1))
+        
+        r = d.get_limiter(car_ordinal=1, current_rpm=8050.0, accel=255, game_max_rpm=8000.0)
+        r = d.get_limiter(car_ordinal=1, current_rpm=7800.0, accel=255, game_max_rpm=8000.0)
+        self.assertEqual(d.car_data[1]["bounces"], 2)
+        
+        r = d.get_limiter(car_ordinal=1, current_rpm=8050.0, accel=255, game_max_rpm=8000.0)
+        r = d.get_limiter(car_ordinal=1, current_rpm=7800.0, accel=255, game_max_rpm=8000.0)
+        self.assertEqual(d.car_data[1]["bounces"], 3)
+        self.assertTrue(d.is_locked(1))
+        
+        r = d.get_limiter(car_ordinal=1, current_rpm=5000.0, accel=0, game_max_rpm=8000.0)
+        self.assertEqual(r, 8100.0)
+
+    def test_reset(self):
+        d = fwl.RedlineDetector()
+        d.get_limiter(car_ordinal=1, current_rpm=8100.0, accel=255, game_max_rpm=8000.0)
+        self.assertIn(1, d.car_data)
+        d.reset(1)
+        self.assertNotIn(1, d.car_data)
+        d.reset(99)
+
+    def test_initialize_from_cache(self):
+        cached = {
+            1234: {
+                "redline": 8200.0,
+                "nominal_max_rpm": 8000.0,
+                "led_min_rpm_ratio": 0.65,
+                "blink_offset_low_gear_rpm": 150,
+                "blink_offset_high_gear_rpm": 100,
+                "blink_hz": 10.0
+            },
+            5678: {
+                "redline": 6000.0,
+                "nominal_max_rpm": 0.0,
+                "led_min_rpm_ratio": 0.65,
+                "blink_offset_low_gear_rpm": 150,
+                "blink_offset_high_gear_rpm": 100,
+                "blink_hz": 10.0
+            }
+        }
+        d = fwl.RedlineDetector(cached_cars=cached)
+        r = d.get_limiter(car_ordinal=1234, current_rpm=5000.0, accel=0, game_max_rpm=8000.0)
+        self.assertEqual(r, 8200.0)
+        self.assertTrue(d.is_locked(1234))
+        
+        r2 = d.get_limiter(car_ordinal=5678, current_rpm=4000.0, accel=0, game_max_rpm=5800.0)
+        self.assertEqual(r2, 6000.0)
+        self.assertTrue(d.is_locked(5678))
+        self.assertEqual(d.car_data[5678]["nominal_max_rpm"], 5800.0)
+
+    def test_nominal_limit_change_resets(self):
+        cached = {
+            1234: {
+                "redline": 8200.0,
+                "nominal_max_rpm": 8000.0
+            }
+        }
+        d = fwl.RedlineDetector(cached_cars=cached)
+        r = d.get_limiter(car_ordinal=1234, current_rpm=5000.0, accel=0, game_max_rpm=8300.0)
+        self.assertEqual(r, 8300.0)
+        self.assertFalse(d.is_locked(1234))
+
+    def test_overrev_unlock_removed(self):
+        cached = {
+            1234: {
+                "redline": 8000.0,
+                "nominal_max_rpm": 8000.0
+            }
+        }
+        d = fwl.RedlineDetector(cached_cars=cached)
+        r = d.get_limiter(car_ordinal=1234, current_rpm=8250.0, accel=250, game_max_rpm=8000.0)
+        self.assertEqual(r, 8000.0)
+        self.assertTrue(d.is_locked(1234))
+
+    def test_accel_release_resets_peaks(self):
+        d = fwl.RedlineDetector()
+        d.get_limiter(car_ordinal=1, current_rpm=9000.0, accel=255, game_max_rpm=10000.0)
+        self.assertEqual(d.car_data[1]["max_seen"], 9000.0)
+        d.get_limiter(car_ordinal=1, current_rpm=8000.0, accel=0, game_max_rpm=10000.0)
+        self.assertEqual(d.car_data[1]["max_seen"], 0.0)
 
 # ---------------------------------------------------------------------------
 # Guard

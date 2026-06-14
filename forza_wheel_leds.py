@@ -1,25 +1,26 @@
 """
 forza_wheel_leds.py
 --------------------
-Bridges Forza telemetry (UDP Data Out) to the Logitech G29/G920 RPM LEDs.
+Bridges Forza telemetry (UDP Data Out) to the Logitech G29/G920/G923 RPM LEDs.
 
 Supported games : Forza Horizon 5, Forza Horizon 6, Forza Motorsport (2023)
-Supported wheels: Logitech G29, G920 (direct USB HID — no G HUB required)
+Supported wheels: Logitech G29, G920, G923 (direct USB HID — no G HUB required)
 
 Requirements:
-  - Python 3.8+  (not needed if using the .exe release)
-  - hidapi.dll bundled in the .exe release (Windows inbox-independent)
+- Python 3.8+  (not needed if using the .exe release)
+- hidapi.dll bundled in the .exe release (Windows inbox-independent)
 
 In-game setup (all supported Forza titles):
-  Settings > HUD and Gameplay  (or Gameplay & HUD)
-    Data Out             : ON
-    Data Out IP Address  : 127.0.0.1
-    Data Out IP Port     : 5607
+Settings > HUD and Gameplay  (or Gameplay & HUD)
+Data Out             : ON
+Data Out IP Address  : 127.0.0.1
+Data Out IP Port     : 5607
 """
 
 import configparser
 import ctypes
 import ctypes.util
+import msvcrt
 import os
 import socket
 import struct
@@ -30,11 +31,13 @@ import time
 # DEFAULT CONFIGURATION  (overridden by config.ini if present)
 # ---------------------------------------------------------------------------
 
-UDP_PORT          = 5607   # Must match the port set in-game
-UDP_IP            = "0.0.0.0"
-LED_MIN_RPM_RATIO = 0.65   # First LED lights at this fraction of redline
-BLINK_RPM_RATIO   = 0.90   # All LEDs blink above this fraction of redline
-BLINK_HZ          = 10.0   # Blink frequency in Hz
+UDP_PORT           = 5607   # Must match the port set in-game
+UDP_IP             = "0.0.0.0"
+LED_MIN_RPM_RATIO  = 0.65   # First LED lights at this fraction of redline
+BLINK_OFFSET_LOW_GEAR_RPM = 750 # Blink offset for gears 1-3
+BLINK_OFFSET_HIGH_GEAR_RPM = 500 # Blink offset for gears 4+
+USE_AUTO_REDLINE   = True   # Automatically detect actual rev limiter
+BLINK_HZ           = 10.0   # Blink frequency in Hz
 
 CONFIG_FILENAME = "config.ini"
 
@@ -52,6 +55,7 @@ def load_config(path: str) -> dict:
     """
     Read config.ini and return a dict of validated settings.
     Missing keys fall back to the module-level defaults.
+    Also parses [car_XXXX] sections.
     """
     cfg = configparser.ConfigParser()
     cfg.read(path)
@@ -59,15 +63,19 @@ def load_config(path: str) -> dict:
 
     def _float(key, default):
         try:
-            return float(s.get(key, default))
+            return float(s.get(key, str(default)))
         except ValueError:
             return float(default)
 
     def _int(key, default):
         try:
-            return int(s.get(key, default))
+            return int(s.get(key, str(default)))
         except ValueError:
             return int(default)
+
+    def _bool(key, default):
+        raw = s.get(key, str(default)).lower()
+        return raw in ("true", "1", "yes", "on")
 
     # [forward] section: targets = ip:port, ip:port, ...
     forward_targets = []
@@ -84,24 +92,82 @@ def load_config(path: str) -> dict:
                 except ValueError:
                     pass  # ignore malformed entries
 
+    # Parse [car_XXXX] sections
+    cars = {}
+    for section in cfg.sections():
+        if section.startswith("car_"):
+            try:
+                ordinal = int(section.split("_")[1])
+                sec = cfg[section]
+                cars[ordinal] = {
+                    "redline": float(sec.get("redline", "0.0")),
+                    "nominal_max_rpm": float(sec.get("nominal_max_rpm", "0.0")),
+                    "led_min_rpm_ratio": float(sec.get("led_min_rpm_ratio", str(LED_MIN_RPM_RATIO))),
+                    "blink_offset_low_gear_rpm": int(sec.get("blink_offset_low_gear_rpm", str(BLINK_OFFSET_LOW_GEAR_RPM))),
+                    "blink_offset_high_gear_rpm": int(sec.get("blink_offset_high_gear_rpm", str(BLINK_OFFSET_HIGH_GEAR_RPM))),
+                    "blink_hz": float(sec.get("blink_hz", str(BLINK_HZ))),
+                }
+            except (ValueError, IndexError):
+                pass
+
     return {
         "udp_port":          _int  ("udp_port",          UDP_PORT),
         "led_min_rpm_ratio": _float("led_min_rpm_ratio", LED_MIN_RPM_RATIO),
-        "blink_rpm_ratio":   _float("blink_rpm_ratio",   BLINK_RPM_RATIO),
+        "blink_offset_low_gear_rpm":  _int  ("blink_offset_low_gear_rpm",  BLINK_OFFSET_LOW_GEAR_RPM),
+        "blink_offset_high_gear_rpm":  _int  ("blink_offset_high_gear_rpm",  BLINK_OFFSET_HIGH_GEAR_RPM),
+        "use_auto_redline":  _bool ("use_auto_redline",  USE_AUTO_REDLINE),
         "blink_hz":          _float("blink_hz",          BLINK_HZ),
         "forward_targets":   forward_targets,
+        "cars":              cars,
     }
 
+
+def save_config(path: str, settings: dict) -> None:
+    """Write current settings back to config.ini, including [car_XXXX] sections."""
+    cfg = configparser.ConfigParser()
+    cfg.read(path)
+    if "settings" not in cfg:
+        cfg["settings"] = {}
+    
+    s = cfg["settings"]
+    s["udp_port"]          = str(settings["udp_port"])
+    s["led_min_rpm_ratio"] = f"{settings['led_min_rpm_ratio']:.2f}"
+    s["blink_offset_low_gear_rpm"]  = str(settings["blink_offset_low_gear_rpm"])
+    s["blink_offset_high_gear_rpm"]  = str(settings["blink_offset_high_gear_rpm"])
+    s["use_auto_redline"]  = "true" if settings["use_auto_redline"] else "false"
+    s["blink_hz"]          = str(int(settings["blink_hz"]))
+
+    # Write car sections
+    for ordinal, cdata in settings.get("cars", {}).items():
+        section = f"car_{ordinal}"
+        if section not in cfg:
+            cfg[section] = {}
+        sec = cfg[section]
+        sec["redline"] = f"{cdata['redline']:.1f}"
+        sec["nominal_max_rpm"] = f"{cdata.get('nominal_max_rpm', 0.0):.1f}"
+        sec["led_min_rpm_ratio"] = f"{cdata['led_min_rpm_ratio']:.2f}"
+        sec["blink_offset_low_gear_rpm"] = str(cdata['blink_offset_low_gear_rpm'])
+        sec["blink_offset_high_gear_rpm"] = str(cdata['blink_offset_high_gear_rpm'])
+        sec["blink_hz"] = str(int(cdata['blink_hz']))
+
+    try:
+        with open(path, "w") as f:
+            cfg.write(f)
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------------------
-# LOGITECH G29 / G920  —  DIRECT USB HID via hidapi.dll (ctypes)
+# LOGITECH G29 / G920 / G923  —  DIRECT USB HID via hidapi.dll (ctypes)
 # ---------------------------------------------------------------------------
 
 LOGITECH_VID = 0x046D
 WHEEL_PIDS = [
     0xC24F,  # G29 (PC / PS3 mode)
-    0xC262,  # G920,
-    0xC26E,  # G923 (XBOX / PC)
-    0xC266,  # G923 (PS / PC)
+    0xC262,  # G920
+    0xC266,  # G923 (PS4 / PC)
+    0xC26D,  # G923 (Xbox / PC)
+    0xC26E,  # G923 (Xbox / PC - compatibility mode)
 ]
 
 NUM_LEDS     = 5
@@ -232,6 +298,8 @@ IDX_IS_RACE_ON      = 0
 IDX_ENGINE_MAX_RPM  = 2
 IDX_ENGINE_IDLE_RPM = 3
 IDX_CURRENT_RPM     = 4
+IDX_CAR_ORDINAL     = 53
+IDX_ACCEL           = 77
 IDX_GEAR            = 81
 
 SIZE_FH5_FH6  = 323
@@ -262,12 +330,14 @@ def patch_and_parse(data: bytes):
         return None
 
     return {
-        "game":        GAME_LABELS[size],
-        "is_race_on":  bool(vals[IDX_IS_RACE_ON]),
-        "current_rpm": float(vals[IDX_CURRENT_RPM]),
-        "max_rpm":     float(vals[IDX_ENGINE_MAX_RPM]),
-        "idle_rpm":    float(vals[IDX_ENGINE_IDLE_RPM]),
-        "gear":        int(vals[IDX_GEAR]),
+        "game":          GAME_LABELS[size],
+        "is_race_on":    bool(vals[IDX_IS_RACE_ON]),
+        "current_rpm":   float(vals[IDX_CURRENT_RPM]),
+        "max_rpm":       float(vals[IDX_ENGINE_MAX_RPM]),
+        "idle_rpm":      float(vals[IDX_ENGINE_IDLE_RPM]),
+        "car_ordinal":   int(vals[IDX_CAR_ORDINAL]),
+        "accel":         int(vals[IDX_ACCEL]),
+        "gear":          int(vals[IDX_GEAR]),
     }
 
 
@@ -331,34 +401,136 @@ def forward_packet(sock: socket.socket, data: bytes,
 
 
 # ---------------------------------------------------------------------------
+# DYNAMIC REDLINE DETECTION
+# ---------------------------------------------------------------------------
+
+class RedlineDetector:
+    """
+    Detects the actual rev limiter by observing RPM behavior.
+    The user is expected to pin the throttle in a low gear until it bounces.
+    """
+    def __init__(self, cached_cars=None):
+        self.car_data = {} # car_ordinal -> {max_seen, bounces, is_locked, last_rpm, nominal_max_rpm}
+        self.cached_cars = cached_cars or {}
+
+    def get_limiter(self, car_ordinal, current_rpm, accel, game_max_rpm):
+        if car_ordinal not in self.car_data:
+            if car_ordinal in self.cached_cars and self.cached_cars[car_ordinal].get("redline", 0) > 0:
+                c = self.cached_cars[car_ordinal]
+                self.car_data[car_ordinal] = {
+                    "max_seen": c["redline"],
+                    "bounces": 3,
+                    "is_locked": True,
+                    "last_rpm": 0.0,
+                    "nominal_max_rpm": c.get("nominal_max_rpm", game_max_rpm)
+                }
+            else:
+                self.car_data[car_ordinal] = {
+                    "max_seen": 0.0,
+                    "bounces": 0,
+                    "is_locked": False,
+                    "last_rpm": 0.0,
+                    "nominal_max_rpm": game_max_rpm
+                }
+        
+        d = self.car_data[car_ordinal]
+
+        # Ensure nominal_max_rpm is populated if it was 0
+        if d["nominal_max_rpm"] <= 0 and game_max_rpm > 0:
+            d["nominal_max_rpm"] = game_max_rpm
+
+        # 1. Check for material nominal limit change (engine swap/upgrade)
+        if game_max_rpm > 0 and d["nominal_max_rpm"] > 0:
+            if abs(game_max_rpm - d["nominal_max_rpm"]) > 250:
+                self.reset(car_ordinal)
+                self.car_data[car_ordinal] = {
+                    "max_seen": 0.0,
+                    "bounces": 0,
+                    "is_locked": False,
+                    "last_rpm": 0.0,
+                    "nominal_max_rpm": game_max_rpm
+                }
+                return game_max_rpm
+
+        # If already locked, just return it
+        if d["is_locked"]:
+            return d["max_seen"]
+
+        # Only calibrate if throttle is pinned (>= 250/255)
+        if accel < 250:
+            if not d["is_locked"]:
+                d["max_seen"] = 0.0
+                d["bounces"] = 0
+            d["last_rpm"] = current_rpm
+            return game_max_rpm
+
+        if current_rpm > d["max_seen"]:
+            d["max_seen"] = current_rpm
+            d["bounces"] = 0 # reset bounce counter when we find a new peak
+        
+        # Detect bounce: RPM was very high, but suddenly dropped while pinning throttle
+        if d["last_rpm"] > d["max_seen"] * 0.98 and current_rpm < d["last_rpm"] - 40:
+            d["bounces"] += 1
+            if d["bounces"] >= 3:
+                d["is_locked"] = True
+        
+        d["last_rpm"] = current_rpm
+        return d["max_seen"] if d["is_locked"] else game_max_rpm
+
+    def is_locked(self, car_ordinal):
+        return self.car_data.get(car_ordinal, {}).get("is_locked", False)
+
+    def reset(self, car_ordinal):
+        if car_ordinal in self.car_data:
+            del self.car_data[car_ordinal]
+        if car_ordinal in self.cached_cars:
+            self.cached_cars[car_ordinal]["redline"] = 0.0
+
+
+# ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # Run GUI by default unless --cli is specified, or we are running unit tests
+    is_testing = any(x in sys.modules for x in ("pytest", "unittest"))
+    if "--cli" not in sys.argv and not is_testing:  # pragma: no cover
+        import forza_wheel_leds_gui
+        forza_wheel_leds_gui.run_gui()
+        return
+
     # --- Load config ---
     cfg_path = _config_path()
     cfg = load_config(cfg_path)
 
     udp_port          = cfg["udp_port"]
     led_min_rpm_ratio = cfg["led_min_rpm_ratio"]
-    blink_rpm_ratio   = cfg["blink_rpm_ratio"]
+    blink_offset_low_gear_rpm = cfg["blink_offset_low_gear_rpm"]
+    blink_offset_high_gear_rpm = cfg["blink_offset_high_gear_rpm"]
+    use_auto_redline  = cfg["use_auto_redline"]
     blink_hz          = cfg["blink_hz"]
     blink_interval    = 1.0 / blink_hz
     forward_targets   = cfg["forward_targets"]
 
+    if "cars" not in cfg:
+        cfg["cars"] = {}
     cfg_source = "config.ini" if os.path.exists(cfg_path) else "defaults"
+    detector = RedlineDetector(cfg["cars"])
 
     print("=" * 58)
-    print("  forza-wheel-leds  |  Logitech G29 / G920 RPM LEDs")
+    print("  forza-wheel-leds  |  Logitech G29 / G920 / G923 RPM LEDs")
     print("=" * 58)
-    print(f"  Version        : 1.4.0")
+    print(f"  Version        : 1.5.0")
     print(f"  Config         : {cfg_source}")
     print(f"  Listening on   : {UDP_IP}:{udp_port}")
-    print(f"  LED min RPM    : {int(led_min_rpm_ratio * 100)} % of redline")
-    print(f"  Blink at       : {int(blink_rpm_ratio * 100)} % of redline  ({blink_hz:.0f} Hz)")
-    if forward_targets:
-        for host, port in forward_targets:
-            print(f"  Forwarding to  : {host}:{port}")
+    print(f"  LED min RPM    : {int(led_min_rpm_ratio * 100)} % of limiter")
+    print(f"  Blink offset   : {blink_offset_low_gear_rpm} (gears 1-3) / {blink_offset_high_gear_rpm} (gears 4+) RPM before limiter  ({blink_hz:.0f} Hz)")
+    print("-" * 58)
+    print("  Live Controls:")
+    print("    UP / DOWN    : Adjust LED min %")
+    print("    LEFT / RIGHT : Adjust Blink offset RPM (Both)")
+    print("    R            : Reset redline for current car")
+    print("    S            : Save current settings to config.ini")
     print("=" * 58)
     print()
 
@@ -372,7 +544,7 @@ def main() -> None:
         print("        If running the .py script, place hidapi.dll next to it.")
         print("        Download from: https://github.com/libusb/hidapi/releases")
         print()
-        input("  Press Enter to close this window …")
+        input("  Press Enter to close this window \u2026")
         sys.exit(1)
 
     # --- Open wheel ---
@@ -389,26 +561,84 @@ def main() -> None:
     # --- UDP socket ---
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((UDP_IP, udp_port))
-    sock.settimeout(1.0)
+    sock.settimeout(0.1) # shorter timeout for more responsive keyboard handling
 
     print(f"[OK]   UDP socket bound to {UDP_IP}:{udp_port}")
     print()
-    print("  In-game setup (do once per Forza title):")
-    print("    Settings > HUD and Gameplay > Data Out : ON")
-    print(f"    Data Out IP Address : 127.0.0.1")
-    print(f"    Data Out IP Port    : {udp_port}")
-    print()
-    print("  Waiting for Forza telemetry …")
-    print("  Close this window (or press Ctrl+C) to stop.")
+    print("  Waiting for Forza telemetry \u2026")
     print()
 
     last_game   = ""
     blink_phase = False
     last_blink  = 0.0
+    key_signal  = ""
+    active_car_ordinal = None
+    active_nominal_max = 0.0
 
     try:
         while True:
+            # --- Handle Keyboard Input ---
+            while msvcrt.kbhit():
+                raw = msvcrt.getch()
+                # print(f"\n[DEBUG] Key: {repr(raw)}") # Uncomment to see raw codes
+                
+                # Identify key robustly
+                if isinstance(raw, bytes) and raw in (b'\x00', b'\xe0'):
+                    suffix = msvcrt.getch()
+                    # print(f"[DEBUG] Suffix: {repr(suffix)}")
+                    if suffix.lower() == b'h': key_signal = "up"
+                    elif suffix.lower() == b'p': key_signal = "down"
+                    elif suffix.lower() == b'k': key_signal = "left"
+                    elif suffix.lower() == b'm': key_signal = "right"
+                else:
+                    try:
+                        # Decode if bytes, otherwise handle as string
+                        char = raw.decode('ascii', errors='ignore').lower() if isinstance(raw, bytes) else str(raw).lower()
+                        if char == 'r': key_signal = "reset"
+                        elif char == 's': key_signal = "save"
+                        elif char == 'q': raise KeyboardInterrupt
+                    except:
+                        continue
+
+                # Apply actions
+                if key_signal == "up":
+                    led_min_rpm_ratio = round(min(0.95, led_min_rpm_ratio + 0.05), 2)
+                    print(f"\n[INFO] LED Min: {int(led_min_rpm_ratio*100)}%")
+                    key_signal = ""
+                elif key_signal == "down":
+                    led_min_rpm_ratio = round(max(0.1, led_min_rpm_ratio - 0.05), 2)
+                    print(f"\n[INFO] LED Min: {int(led_min_rpm_ratio*100)}%")
+                    key_signal = ""
+                elif key_signal == "right":
+                    blink_offset_low_gear_rpm = min(2000, blink_offset_low_gear_rpm + 50)
+                    blink_offset_high_gear_rpm = min(2000, blink_offset_high_gear_rpm + 50)
+                    print(f"\n[INFO] Blink Offset: -{blink_offset_low_gear_rpm} (low) / -{blink_offset_high_gear_rpm} (high) RPM")
+                    key_signal = ""
+                elif key_signal == "left":
+                    blink_offset_low_gear_rpm = max(0, blink_offset_low_gear_rpm - 50)
+                    blink_offset_high_gear_rpm = max(0, blink_offset_high_gear_rpm - 50)
+                    print(f"\n[INFO] Blink Offset: -{blink_offset_low_gear_rpm} (low) / -{blink_offset_high_gear_rpm} (high) RPM")
+                    key_signal = ""
+                elif key_signal == "save":
+                    cfg["led_min_rpm_ratio"] = led_min_rpm_ratio
+                    cfg["blink_offset_low_gear_rpm"] = blink_offset_low_gear_rpm
+                    cfg["blink_offset_high_gear_rpm"] = blink_offset_high_gear_rpm
+                    if active_car_ordinal is not None and detector.is_locked(active_car_ordinal):
+                        cfg["cars"][active_car_ordinal] = {
+                            "redline": detector.car_data[active_car_ordinal]["max_seen"],
+                            "nominal_max_rpm": active_nominal_max,
+                            "led_min_rpm_ratio": led_min_rpm_ratio,
+                            "blink_offset_low_gear_rpm": blink_offset_low_gear_rpm,
+                            "blink_offset_high_gear_rpm": blink_offset_high_gear_rpm,
+                            "blink_hz": blink_hz
+                        }
+                    save_config(cfg_path, cfg)
+                    print(f"\n[OK]   Settings saved to {CONFIG_FILENAME}")
+                    key_signal = ""
+
             try:
+                # Use a slightly longer timeout if no packets are coming,
+                # but keep it short enough for UI responsiveness.
                 data, addr = sock.recvfrom(2048)
             except socket.timeout:
                 continue
@@ -418,14 +648,26 @@ def main() -> None:
 
             packet = patch_and_parse(data)
             if packet is None:
-                # Log first packet in detail to help diagnose unknown format
-                hex_preview = data[:32].hex(" ")
-                print(f"\n[UDP] Unknown packet — size {len(data)} bytes")
-                print(f"      From  : {addr[0]}:{addr[1]}")
-                print(f"      Bytes : {hex_preview} …")
-                print(f"      (copy the above and send it for diagnosis)")
-                print()
                 continue
+
+            if packet["car_ordinal"] > 0 and packet["car_ordinal"] != active_car_ordinal:
+                active_car_ordinal = packet["car_ordinal"]
+                cars = cfg.get("cars", {})
+                if active_car_ordinal in cars:
+                    c = cars[active_car_ordinal]
+                    led_min_rpm_ratio = c.get("led_min_rpm_ratio", cfg["led_min_rpm_ratio"])
+                    blink_offset_low_gear_rpm = c.get("blink_offset_low_gear_rpm", cfg["blink_offset_low_gear_rpm"])
+                    blink_offset_high_gear_rpm = c.get("blink_offset_high_gear_rpm", cfg["blink_offset_high_gear_rpm"])
+                    blink_hz = c.get("blink_hz", cfg["blink_hz"])
+                    print(f"\n[INFO] Loaded settings for car {active_car_ordinal}: Min LED {int(led_min_rpm_ratio*100)}%, Blink Offset -{blink_offset_low_gear_rpm}/-{blink_offset_high_gear_rpm} RPM, Blink Hz {blink_hz}")
+                else:
+                    led_min_rpm_ratio = cfg["led_min_rpm_ratio"]
+                    blink_offset_low_gear_rpm = cfg["blink_offset_low_gear_rpm"]
+                    blink_offset_high_gear_rpm = cfg["blink_offset_high_gear_rpm"]
+                    blink_hz = cfg["blink_hz"]
+                blink_interval = 1.0 / blink_hz
+
+            active_nominal_max = packet["max_rpm"]
 
             if packet["game"] != last_game:
                 print(f"\n[INFO] Game detected: {packet['game']}")
@@ -436,18 +678,50 @@ def main() -> None:
                 if handle is not None:
                     print("\n[OK]   Logitech wheel connected via USB HID.")
 
-            if packet["max_rpm"] <= 0:
+            # Process 'reset' signal once car_ordinal is known
+            if key_signal == "reset":
+                detector.reset(active_car_ordinal)
+                print(f"\n[INFO] Redline reset for car {active_car_ordinal}")
+                key_signal = ""
+
+            if not packet["is_race_on"] or packet["max_rpm"] <= 0:
                 if handle is not None:
                     apply_led_action(lib, handle, LED_OFF, 0, 0, 0)
-                print("  In menu — LEDs off …                   ", end="\r")
+                print("  In menu \u2014 LEDs off \u2026                   ", end="\r")
                 continue
 
-            min_rpm      = packet["max_rpm"] * led_min_rpm_ratio
-            blink_thresh = packet["max_rpm"] * blink_rpm_ratio
+            # Redline logic
+            limiter = packet["max_rpm"]
+            calib_str = ""
+            if use_auto_redline:
+                was_locked = packet["car_ordinal"] in cfg.get("cars", {})
+                limiter = detector.get_limiter(packet["car_ordinal"], packet["current_rpm"], 
+                                             packet["accel"], packet["max_rpm"])
+                is_locked = detector.is_locked(packet["car_ordinal"])
+                if is_locked:
+                    calib_str = "[CALIBRATED]"
+                    current_cached = cfg.get("cars", {}).get(packet["car_ordinal"], {})
+                    if not was_locked or abs(current_cached.get("redline", 0.0) - limiter) > 1.0:
+                        cfg["cars"][packet["car_ordinal"]] = {
+                            "redline": limiter,
+                            "nominal_max_rpm": packet["max_rpm"],
+                            "led_min_rpm_ratio": led_min_rpm_ratio,
+                            "blink_offset_low_gear_rpm": blink_offset_low_gear_rpm,
+                            "blink_offset_high_gear_rpm": blink_offset_high_gear_rpm,
+                            "blink_hz": blink_hz
+                        }
+                        save_config(cfg_path, cfg)
+                        print(f"\n[OK]   Auto-saved calibration for car {packet['car_ordinal']} to config.ini")
+                else:
+                    calib_str = "[CALIBRATING...]"
+
+            min_rpm      = limiter * led_min_rpm_ratio
+            active_offset = blink_offset_low_gear_rpm if packet["gear"] <= 3 else blink_offset_high_gear_rpm
+            blink_thresh = max(min_rpm + 100, limiter - active_offset)
 
             action, blink_phase, last_blink = compute_led_state(
                 current_rpm    = packet["current_rpm"],
-                max_rpm        = packet["max_rpm"],
+                max_rpm        = limiter,
                 blink_phase    = blink_phase,
                 last_blink     = last_blink,
                 now            = time.time(),
@@ -457,16 +731,21 @@ def main() -> None:
 
             if handle is not None:
                 apply_led_action(lib, handle, action,
-                                 packet["current_rpm"], min_rpm, packet["max_rpm"])
+                                 packet["current_rpm"], min_rpm, limiter)
 
-            blink_str = " *** REDLINE ***" if action in (LED_BLINK_ON, LED_BLINK_OFF) else ""
+            blink_msg = " *** REDLINE ***" if action in (LED_BLINK_ON, LED_BLINK_OFF) else ""
             gear_str  = "R" if packet["gear"] == 0 else str(packet["gear"])
+            
+            # Update live info line
+            settings_str = f"Min {int(led_min_rpm_ratio*100)}% | Blink -{blink_offset_low_gear_rpm}/-{blink_offset_high_gear_rpm}"
             print(
-                f"  RPM {packet['current_rpm']:6.0f} / {packet['max_rpm']:.0f}"
-                f"  |  Gear {gear_str}"
-                f"  |  {packet['game']}{blink_str}   ",
+                f"  RPM {packet['current_rpm']:6.0f} / {limiter:5.0f} {calib_str}"
+                f" | Gear {gear_str}"
+                f" | {settings_str}{blink_msg}    ",
                 end="\r",
             )
+
+
 
     except KeyboardInterrupt:
         print("\n[INFO] Shutting down …")

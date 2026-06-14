@@ -1,6 +1,6 @@
 # forza-wheel-leds
 
-Lights up the RPM LEDs on your **Logitech G29 / G920** steering wheel using live telemetry from **Forza Horizon 5**, **Forza Horizon 6**, and **Forza Motorsport (2023)**.
+Lights up the RPM LEDs on your **Logitech G29 / G920 / G923** steering wheel using live telemetry from **Forza Horizon 5**, **Forza Horizon 6**, and **Forza Motorsport (2023)**.
 
 Forza does not natively drive the wheel LEDs — this tool bridges the gap.
 
@@ -30,7 +30,7 @@ No Logitech G HUB required. No DLL. No driver.
 | Requirement | Notes |
 |---|---|
 | Windows 10 / 11 | Linux/macOS not officially supported |
-| Logitech G29 or G920 | Plugged in via USB |
+| Logitech G29, G920, or G923 | Plugged in via USB |
 | Python 3.8+ | Only needed if running the `.py` script — not needed for the `.exe` release |
 
 ---
@@ -41,7 +41,7 @@ No Logitech G HUB required. No DLL. No driver.
 
 1. Download the latest `forza_wheel_leds_vX.X.X.zip` from [Releases](../../releases/latest) and extract it.
 2. Configure Forza (see [In-game setup](#in-game-setup)).
-3. Plug in your G29 or G920 via USB.
+3. Plug in your G29, G920, or G923 via USB.
 4. *(Optional)* Edit `config.ini` to customize port and LED thresholds.
 5. Double-click `forza_wheel_leds.exe`.
 
@@ -83,6 +83,7 @@ Data Out IP Port     : 5607
 |---|---|---|
 | Logitech G29 | 5 (green → yellow → red) | `046D:C24F` |
 | Logitech G920 | 5 | `046D:C262` |
+| Logitech G923 | 5 | `046D:C266`, `046D:C26D`, `046D:C26E` |
 
 ---
 
@@ -104,35 +105,25 @@ Data Out IP Port     : 5607
 ## Configuration
 
 A `config.ini` file is included in the release archive next to the `.exe`.  
-Edit it with any text editor — **no recompile needed**.
+Edit it with any text editor, or use the **Live Controls** (see above) and press **S** to save.
 
 ```ini
 [settings]
 ; UDP port — must match "Data Out IP Port" in-game (default: 5607)
 udp_port = 5607
 
-; Fraction of max RPM at which the FIRST LED lights up (0.0 – 1.0)
+; Fraction of limiter at which the FIRST LED lights up (0.0 – 1.0)
 led_min_rpm_ratio = 0.65
 
-; Rev-limiter blink: all LEDs flash above this fraction of max RPM (0.0 – 1.0)
-blink_rpm_ratio = 0.90
+; RPM before the limiter at which all LEDs start blinking
+blink_offset_rpm = 250
+
+; Automatically detect the actual engine limiter (recommended)
+use_auto_redline = true
 
 ; Blink frequency in Hz
 blink_hz = 10
-
-[forward]
-; Forward the raw telemetry stream to additional destinations.
-; Useful if you also run a sim-racing companion app (e.g. on your phone).
-; Set Forza Data Out to 127.0.0.1:5607 — this tool receives it and
-; rebroadcasts to every target listed here.
-;
-; Format: comma-separated list of  host:port
-; Example:
-;   targets = 192.168.1.42:5607, 127.0.0.1:5608
-targets =
 ```
-
-If `config.ini` is absent or a key is missing, the default value is used.
 
 ---
 
@@ -208,11 +199,20 @@ min_rpm ────────────────────────
   ○ ○ ○ ○ ○  →  ● ○ ○ ○ ○  →  ● ● ● ● ●
 ```
 
-When `currentRPM ≥ 90 % of max_rpm` (rev-limiter zone), all LEDs flash on/off at 10 Hz.
+When `currentRPM ≥ limiter - blink_offset_rpm`, all LEDs flash on/off at 10 Hz.
 
-### 5. USB HID command
+### 5. Dynamic Redline Detection
 
-The G29 and G920 accept LED commands via a 7-byte HID output report (confirmed from the Linux kernel `hid-lg4ff.c`):
+Forza's `EngineMaxRpm` often represents the end of the tachometer, not the actual engine limiter. This tool automatically detects the actual limiter for each car:
+
+1.  **Calibrating:** Drive any car and pin the throttle (100 %) in 1st gear.
+2.  **Bouncing:** Let the engine bounce off the limiter 3 times.
+3.  **Locked:** The tool detects the "bounce" pattern and locks that RPM as the actual redline for that car.
+4.  **Blink point:** The blink threshold is then calculated relative to this actual limiter (e.g. 250 RPM before it).
+
+### 6. USB HID command
+
+The G29, G920, and G923 accept LED commands via a 7-byte HID output report (confirmed from the Linux kernel `hid-lg4ff.c`):
 
 ```
 Byte 0: 0xF8   — extended command prefix
@@ -229,5 +229,5 @@ forza_wheel_leds.py
   ├── socket.recvfrom(2048)    — UDP listener (blocking, 1 s timeout)
   │
   └── hid.device().write([0x00, 0xF8, 0x12, bitmask, 0, 0, 0, 0])
-          └── USB HID output report → G29 / G920 LEDs
+          └── USB HID output report → G29 / G920 / G923 LEDs
 ```
