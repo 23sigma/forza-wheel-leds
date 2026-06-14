@@ -4,8 +4,7 @@ Lights up the RPM LEDs on your **Logitech G29 / G920 / G923** steering wheel usi
 
 Forza does not natively drive the wheel LEDs — this tool bridges the gap.
 
-![CI](https://github.com/guivdh/forza-wheel-leds/actions/workflows/build.yml/badge.svg)
-![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
+![CI](https://github.com/23sigma/forza-wheel-leds/actions/workflows/build.yml/badge.svg)
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-blue)
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
