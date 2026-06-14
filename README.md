@@ -14,13 +14,35 @@ Forza does not natively drive the wheel LEDs — this tool bridges the gap.
 ## How it works
 
 ```
-Forza (UDP Data Out)  →  forza-wheel-leds  →  USB HID  →  G29 / G920 RPM LEDs
+┌──────────────────────────┐
+│   Forza Game Engine      │
+│  (Horizon 5/6, FM2023)   │
+└────────────┬─────────────┘
+             │ (60 Hz UDP Telemetry)
+             ▼
+┌──────────────────────────┐
+│     forza-wheel-leds     │
+│  • Reads & Patches UDP   │
+│  • Auto-Calibrates Red   │
+│  • Dual-Gear Blink Sync  │
+│  • Optional Forwarder    │
+└────────────┬─────────────┘
+             │ (Direct USB HID Reports)
+             ▼
+┌──────────────────────────┐
+│    Logitech Steering     │
+│          Wheel           │
+│  (G29 / G920 / G923)     │
+└──────────────────────────┘
 ```
 
-Forza broadcasts real-time telemetry over UDP (~60 packets/s).  
-This tool reads `CurrentEngineRpm` and `EngineMaxRpm` from each packet and sends a direct **USB HID command** to the wheel to light the 5 LEDs accordingly.
+1. **UDP Telemetry Capture**: Forza games broadcast binary telemetry data over UDP (around 60 packets per second). The tool listens on the configured local port to intercept these packets.
+2. **Data Parsing & Padding Removal**: It automatically handles and removes the 12-byte structural gap introduced in Horizon 5/6 telemetry packets, unpacking the exact car ID (ordinal), current gear, live engine RPM, and maximum engine RPM.
+3. **Auto-Calibration (Dynamic Redline)**: Since Forza's native maximum RPM often deviates from the actual in-game engine rev limiter, the tool monitors your RPM behavior under 100% throttle. Once it detects the engine bouncing off the limiter, it locks in the precise redline for that specific car and auto-saves it to your `config.ini` file.
+4. **Dual-Gear Blink Thresholds**: To help you time shifts perfectly, the tool calculates blink thresholds based on your current gear (low gears 1-3 vs high gears 4+). When you reach this threshold, the LEDs flash continuously.
+5. **Direct USB HID Communication**: Instead of relying on Logitech G HUB, SDKs, or background drivers, the tool opens the steering wheel directly as a USB HID device (using `hidapi.dll` via ctypes) and writes standard 8-byte output reports to light the RPM LEDs.
+6. **UDP Forwarding (Optional)**: If you use other telemetry software (like SimHub, motion platforms, or dashboards), the tool can simultaneously mirror the raw incoming UDP packets to multiple IP/port destinations.
 
-No Logitech G HUB required. No DLL. No driver.
 
 ---
 
